@@ -26,12 +26,12 @@ jobs:
 
       - name: Instalar dependências e gerar build Web
         run: |
-          npm install
+          npm install --legacy-peer-deps
           npm run build
 
       - name: Configurar Capacitor e criar projeto Android
         run: |
-          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 --legacy-peer-deps
           npx cap init "Solaris" "com.solaris.jogo" --web-dir dist
           npx cap add android
           npx cap sync
