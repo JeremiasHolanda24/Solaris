@@ -32,7 +32,14 @@ jobs:
       - name: Configurar Capacitor e criar projeto Android
         run: |
           npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 --legacy-peer-deps
-          npx cap init "Solaris" "com.solaris.jogo" --web-dir dist
+          rm -f capacitor.config.ts capacitor.config.js capacitor.config.json
+          cat << 'EOF' > capacitor.config.json
+          {
+            "appId": "com.solaris.jogo",
+            "appName": "Solaris",
+            "webDir": "dist"
+          }
+          EOF
           npx cap add android
           npx cap sync
 
