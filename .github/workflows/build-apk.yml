@@ -31,7 +31,7 @@ jobs:
 
       - name: Configurar Capacitor e criar projeto Android
         run: |
-          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 --legacy-peer-deps
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 @capacitor/assets --legacy-peer-deps
           rm -f capacitor.config.ts capacitor.config.js capacitor.config.json
           cat << 'EOF' > capacitor.config.json
           {
@@ -41,6 +41,13 @@ jobs:
           }
           EOF
           npx cap add android
+          mkdir -p assets
+          if [ -f "icon.png" ]; then
+            cp icon.png assets/icon-only.png
+            cp icon.png assets/icon-foreground.png
+            npx capacitor-assets generate --android
+          fi
+          sed -i 's/android:name=".MainActivity"/android:name=".MainActivity" android:screenOrientation="landscape"/g' android/app/src/main/AndroidManifest.xml
           npx cap sync
 
       - name: Compilar APK
