@@ -1,0 +1,9 @@
+{
+  "name": "Solaris — Ação Orbital 2D",
+  "short_name": "Solaris",
+  "start_url": "/",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#0B1320",
+  "theme_color": "#0B1320"
+}
