@@ -73,4 +73,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Solaris-APK
-          path: android/app/build/outputs/apk/debug/Solaris.apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
