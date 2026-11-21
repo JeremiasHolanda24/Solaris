@@ -96,6 +96,87 @@
   will-change: transform, opacity;
 }
 
+@keyframes cockpit-pressurize {
+  0% {
+    opacity: 0;
+  }
+  18% {
+    opacity: 0.92;
+  }
+  65% {
+    opacity: 0.55;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.animate-cockpit-pressurize {
+  animation: cockpit-pressurize 1.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: opacity;
+}
+
+@keyframes cockpit-scan-sweep {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 100%, 0);
+  }
+  16% {
+    opacity: 0.85;
+  }
+  82% {
+    opacity: 0.72;
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(0, -100%, 0);
+  }
+}
+
+.animate-cockpit-scan-sweep {
+  animation: cockpit-scan-sweep 1.2s cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+@keyframes crack-seal-glow {
+  0% {
+    opacity: 0.95;
+    stroke-dashoffset: 0;
+  }
+  35% {
+    opacity: 1;
+    stroke-dashoffset: 40;
+  }
+  100% {
+    opacity: 0;
+    stroke-dashoffset: 260;
+  }
+}
+
+.animate-crack-seal-glow {
+  stroke-dasharray: 260;
+  animation: crack-seal-glow 1.25s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes hull-diamond-pulse {
+  0% {
+    transform: scale(0.72);
+    opacity: 0.45;
+  }
+  45% {
+    transform: scale(1.26);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.animate-hull-diamond-repair {
+  animation: hull-diamond-pulse 0.75s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

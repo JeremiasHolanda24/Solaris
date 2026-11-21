@@ -12,12 +12,22 @@ import {
 import { CockpitDamageOverlay } from './components/CockpitDamageOverlay';
 import { SettingsModal } from './components/SettingsModal';
 import { TitleLockup } from './components/TitleLockup';
+import { TutorialModal } from './components/TutorialModal';
 import { LORE_ENTRIES } from './data/lore';
 import { AudioSettings, DEFAULT_AUDIO_SETTINGS, GameAudio } from './game/audio';
 import { SolarisEngine } from './game/engine';
 import { DEFAULT_GAMEPLAY_SETTINGS, GameplaySettings, HudSnapshot } from './game/types';
 
 const GAMEPLAY_SETTINGS_KEY = 'solaris_gameplay_settings_v1';
+const TUTORIAL_DISABLED_KEY = 'solaris_tutorial_disabled_v1';
+
+function loadTutorialDisabled(): boolean {
+  try {
+    return localStorage.getItem(TUTORIAL_DISABLED_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
 
 function loadGameplaySettings(): GameplaySettings {
   try {
@@ -61,6 +71,8 @@ const INITIAL_HUD: HudSnapshot = {
   newRecord: false,
   damageFlashRatio: 0,
   damagePulseId: 0,
+  repairAnimRatio: 0,
+  repairPulseId: 0,
 };
 
 function detectTouchDevice(): boolean {
@@ -70,6 +82,15 @@ function detectTouchDevice(): boolean {
     navigator.maxTouchPoints > 0 ||
     window.matchMedia('(pointer: coarse)').matches
   );
+}
+
+function detectPreviewIframe(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
 }
 
 export default function App() {
@@ -84,12 +105,12 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const settingsAutoPausedRef = useRef(false);
   const [isTouch, setIsTouch] = useState<boolean>(detectTouchDevice);
-  const [isPortrait, setIsPortrait] = useState<boolean>(
-    () => typeof window !== 'undefined' && window.innerHeight > window.innerWidth
-  );
+  const [isPreview] = useState<boolean>(detectPreviewIframe);
   const [showLore, setShowLore] = useState(false);
   const [loreTab, setLoreTab] = useState<'mission' | 'sentinels'>('mission');
-  const forceLandscapeStage = isTouch && isPortrait;
+  const [showTutorial, setShowTutorial] = useState(false);
+  const [disableFutureTutorial, setDisableFutureTutorial] = useState(false);
+  const tutorialDisabledRef = useRef<boolean>(loadTutorialDisabled());
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -100,28 +121,31 @@ export default function App() {
     setMuted(audio.isMuted());
     setAudioSettings(audio.getSettings());
 
-    const engine = new SolarisEngine(canvas, audio, (snapshot) => {
-      setHud(snapshot);
-    });
-    engine.setGameplaySettings(loadGameplaySettings());
-    engine.setRotated90(
-      detectTouchDevice() && typeof window !== 'undefined' && window.innerHeight > window.innerWidth
+    const engine = new SolarisEngine(
+      canvas,
+      audio,
+      (snapshot) => {
+        setHud(snapshot);
+      },
+      () => {
+        if (!tutorialDisabledRef.current) {
+          setDisableFutureTutorial(false);
+          engine.setTutorialActive(true);
+          engine.togglePause();
+          setShowTutorial(true);
+        }
+      }
     );
+    engine.setGameplaySettings(loadGameplaySettings());
+    engine.setRotated90(false);
     engineRef.current = engine;
     engine.startLoop();
 
     const onFirstTouch = () => setIsTouch(true);
-    const onResize = () => {
-      setIsPortrait(window.innerHeight > window.innerWidth);
-    };
     window.addEventListener('touchstart', onFirstTouch, { passive: true, once: true });
-    window.addEventListener('resize', onResize);
-    window.addEventListener('orientationchange', onResize);
 
     return () => {
       window.removeEventListener('touchstart', onFirstTouch);
-      window.removeEventListener('resize', onResize);
-      window.removeEventListener('orientationchange', onResize);
       audio.stopPauseHum();
       audio.stopWarningVoice();
       engine.destroy();
@@ -129,24 +153,14 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => {
-    engineRef.current?.setRotated90(forceLandscapeStage);
-  }, [forceLandscapeStage]);
-
-  const tryLockLandscape = useCallback(async () => {
+  const tryEnterFullscreen = useCallback(async () => {
     try {
       const rootEl = document.documentElement;
       if (rootEl.requestFullscreen && !document.fullscreenElement) {
         await rootEl.requestFullscreen().catch(() => {});
       }
-      const orientation = screen.orientation as ScreenOrientation & {
-        lock?: (type: string) => Promise<void>;
-      };
-      if (orientation && typeof orientation.lock === 'function') {
-        await orientation.lock('landscape').catch(() => {});
-      }
     } catch {
-      // Orientation lock not supported on this browser (e.g. iOS Safari)
+      // Fullscreen not supported
     }
   }, []);
 
@@ -249,12 +263,11 @@ export default function App() {
     audioRef.current?.playUiClick('primary');
     setShowLore(false);
     setShowSettings(false);
+    setShowTutorial(false);
     settingsAutoPausedRef.current = false;
-    if (isTouch) {
-      void tryLockLandscape();
-    }
+    engineRef.current?.setTutorialActive(false);
     engineRef.current?.startNewGame();
-  }, [isTouch, tryLockLandscape]);
+  }, []);
 
   const handleTogglePause = useCallback(() => {
     audioRef.current?.playUiClick('secondary');
@@ -265,6 +278,8 @@ export default function App() {
   const handleReturnToTitle = useCallback(() => {
     audioRef.current?.playUiClick('secondary');
     setShowLore(false);
+    setShowTutorial(false);
+    engineRef.current?.setTutorialActive(false);
     engineRef.current?.returnToTitle();
   }, []);
 
@@ -283,31 +298,58 @@ export default function App() {
     setLoreTab(tab);
   }, []);
 
+  const handleSkipCutscene = useCallback(() => {
+    audioRef.current?.playUiClick('tab');
+    engineRef.current?.skipCutscene();
+  }, []);
+
+  const handleToggleDisableFutureTutorial = useCallback(() => {
+    audioRef.current?.playUiClick('tab');
+    setDisableFutureTutorial((prev) => !prev);
+  }, []);
+
+  const handleConfirmTutorial = useCallback(() => {
+    audioRef.current?.playUiClick('primary');
+    if (disableFutureTutorial) {
+      tutorialDisabledRef.current = true;
+      try {
+        localStorage.setItem(TUTORIAL_DISABLED_KEY, 'true');
+      } catch {
+        // Ignore storage failures
+      }
+    }
+    setShowTutorial(false);
+    engineRef.current?.setTutorialActive(false);
+    engineRef.current?.togglePause();
+  }, [disableFutureTutorial]);
+
   const isPlaying = hud.state === 'PLAYING';
   const isTitle = hud.state === 'TITLE_MENU';
+  const isCutscene = hud.state === 'INTRO_CUTSCENE';
   const isPaused = hud.state === 'PAUSED';
   const isGameOver = hud.state === 'GAME_OVER';
   const warningActive = isPlaying && hud.hp > 0 && hud.hp <= 2;
 
-  // Astrolabic pause transition & subtle continuous pause hum
+  // Astrolabic pause transition & subtle continuous pause hum (suppressed while tutorial overlay is open)
   const prevPausedRef = useRef(false);
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
 
-    if (isPaused !== prevPausedRef.current) {
-      prevPausedRef.current = isPaused;
+    const effectivelyPaused = isPaused && !showTutorial;
+    if (effectivelyPaused !== prevPausedRef.current) {
+      prevPausedRef.current = effectivelyPaused;
       if (!muted) {
-        audio.playPauseTransition(isPaused);
+        audio.playPauseTransition(effectivelyPaused);
       }
     }
 
-    if (isPaused && !muted) {
+    if (effectivelyPaused && !muted) {
       audio.startPauseHum();
     } else {
       audio.stopPauseHum();
     }
-  }, [isPaused, muted]);
+  }, [isPaused, showTutorial, muted]);
 
   // Periodic deep male ship-computer "Warning" voice while HP <= 2 until death, repair, pause, or mute
   useEffect(() => {
@@ -339,13 +381,7 @@ export default function App() {
 
   return (
     <div className="fixed inset-0 overflow-hidden bg-[#0B1320]">
-      <div
-        className={
-          forceLandscapeStage
-            ? 'fixed top-1/2 left-1/2 h-[100vw] w-[100dvh] -translate-x-1/2 -translate-y-1/2 rotate-90 overflow-hidden bg-[#0B1320] text-[#F4EFE6]'
-            : 'relative h-[100dvh] w-screen overflow-hidden bg-[#0B1320] text-[#F4EFE6]'
-        }
-      >
+      <div className="relative h-[100dvh] w-screen overflow-hidden bg-[#0B1320] text-[#F4EFE6]">
       {/* Isolated 60fps Game Canvas */}
       <div className="absolute inset-0">
         <canvas
@@ -354,7 +390,7 @@ export default function App() {
         />
       </div>
 
-      {/* TITLE SCREEN OVERLAY (Horizontal-first with safe-area insets for landscape phones) */}
+      {/* TITLE SCREEN OVERLAY */}
       {isTitle && (
         <div className="absolute inset-0 z-20 flex flex-col justify-between pl-[max(1.25rem,env(safe-area-inset-left))] pr-[max(1.25rem,env(safe-area-inset-right))] pt-[max(0.85rem,env(safe-area-inset-top))] pb-[max(0.85rem,env(safe-area-inset-bottom))] sm:px-10 sm:py-8 md:p-14">
           {/* Subtle directional scrim for crisp typography over the live 60fps warp-jump canvas */}
@@ -363,22 +399,8 @@ export default function App() {
             className="pointer-events-none absolute inset-0 bg-gradient-to-r from-[#0B1320]/90 via-[#0B1320]/42 to-transparent"
           />
 
-          {/* Top-right sound button (>= 44px touch target) */}
-          <div className="relative z-10 flex items-center justify-end gap-2">
-            {isTouch && (
-              <button
-                type="button"
-                onClick={() => {
-                  audioRef.current?.playUiClick('tab');
-                  void tryLockLandscape();
-                }}
-                aria-label="Tela cheia horizontal"
-                className="flex h-11 items-center gap-1.5 rounded-md border border-[#E8B84B]/30 bg-[#0B1320]/75 px-3 text-xs font-medium text-[#E8B84B] transition-colors duration-150 hover:border-[#E8B84B] hover:bg-[#132035] whitespace-nowrap cursor-pointer"
-              >
-                <Maximize2 className="h-3.5 w-3.5" />
-                <span>Tela Cheia</span>
-              </button>
-            )}
+          {/* Top-left settings button & preview-only fullscreen control (>= 44px touch target) */}
+          <div className="relative z-10 flex items-center justify-start gap-2">
             <button
               type="button"
               onClick={handleOpenSettings}
@@ -388,6 +410,20 @@ export default function App() {
             >
               <Settings className="h-5 w-5 transition-transform duration-200 group-hover:rotate-45" />
             </button>
+            {isPreview && (
+              <button
+                type="button"
+                onClick={() => {
+                  audioRef.current?.playUiClick('tab');
+                  void tryEnterFullscreen();
+                }}
+                aria-label="Tela cheia"
+                className="flex h-11 items-center gap-1.5 rounded-md border border-[#E8B84B]/30 bg-[#0B1320]/75 px-3 text-xs font-medium text-[#E8B84B] transition-colors duration-150 hover:border-[#E8B84B] hover:bg-[#132035] whitespace-nowrap cursor-pointer"
+              >
+                <Maximize2 className="h-3.5 w-3.5" />
+                <span>Tela Cheia</span>
+              </button>
+            )}
           </div>
 
           {/* Focal Title Lockup & Primary CTA over calm left negative space */}
@@ -434,13 +470,36 @@ export default function App() {
         </div>
       )}
 
-      {/* CRACKED COCKPIT GLASS & PULSING RED WARNING LIGHT */}
-      {!isTitle && gameplaySettings.cockpitDamageFx && (
-        <CockpitDamageOverlay hp={hud.hp} maxHp={hud.maxHp} warningActive={warningActive} />
+      {/* CINEMATIC INTRO CUTSCENE SKIP BUTTON */}
+      {isCutscene && (
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-end justify-end pl-[max(1.25rem,env(safe-area-inset-left))] pr-[max(1.25rem,env(safe-area-inset-right))] pb-[max(0.9rem,env(safe-area-inset-bottom))] sm:p-6">
+          <button
+            type="button"
+            onClick={handleSkipCutscene}
+            onMouseEnter={playHover}
+            className="pointer-events-auto inline-flex h-10 items-center gap-2 rounded-md border border-[#E8B84B]/45 bg-[#0B1320]/80 px-4 text-xs font-medium tracking-wider text-[#F4EFE6]/90 transition-colors duration-150 hover:border-[#E8B84B] hover:bg-[#132035] hover:text-[#E8B84B] cursor-pointer"
+          >
+            <span>Pular</span>
+            <span aria-hidden="true" className="text-[#E8B84B]">
+              ››
+            </span>
+          </button>
+        </div>
+      )}
+
+      {/* CRACKED COCKPIT GLASS, BLUISH PRESSURIZATION & PULSING RED WARNING LIGHT */}
+      {!isTitle && !isCutscene && gameplaySettings.cockpitDamageFx && (
+        <CockpitDamageOverlay
+          hp={hud.hp}
+          maxHp={hud.maxHp}
+          warningActive={warningActive}
+          repairAnimRatio={hud.repairAnimRatio}
+          repairPulseId={hud.repairPulseId}
+        />
       )}
 
       {/* ACTIVE GAMEPLAY HUD (Low-occlusion, pointer-events-none, landscape safe-area insets) */}
-      {!isTitle && (
+      {!isTitle && !isCutscene && (
         <div className="pointer-events-none absolute inset-0 z-10 flex flex-col justify-between pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-[max(0.65rem,env(safe-area-inset-top))] pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-6">
           {/* Top Perimeter HUD (3-column grid keeps Wave & Overdrive mathematically centered, never remounted on damage) */}
           <div className="grid grid-cols-3 items-start gap-2 sm:gap-4">
@@ -497,53 +556,113 @@ export default function App() {
               {warningActive && (
                 <div
                   role="status"
-                  className={`mt-0.5 flex items-center gap-1.5 font-mono text-[11px] font-semibold tracking-wider text-[#FF6B5A] ${
-                    hud.hp === 1 ? 'animate-warning-pulse-fast' : 'animate-warning-pulse-slow'
+                  className={`mt-0.5 flex items-center gap-1.5 font-mono text-[10px] sm:text-[11px] font-semibold tracking-wider whitespace-nowrap ${
+                    hud.hp === 1
+                      ? 'text-[#FF6B5A] animate-warning-pulse-fast'
+                      : 'text-[#FFB347] animate-warning-pulse-slow'
                   }`}
                 >
-                  <span className="h-2 w-2 rounded-full bg-[#FF4B3A]" aria-hidden="true" />
-                  <span>WARNING · CASCO CRÍTICO</span>
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      hud.hp === 1 ? 'bg-[#FF4B3A]' : 'bg-[#FF9F43]'
+                    }`}
+                    aria-hidden="true"
+                  />
+                  <span>{hud.hp === 1 ? 'WARNING · CASCO CRÍTICO' : 'CAUTION · CASCO BAIXO'}</span>
                 </div>
               )}
             </div>
 
-            {/* Top-Right: Shields + Audio/Pause controls (>= 44px touch targets on mobile) */}
+            {/* Top-Right: Shields + Progressive Repair Indicator + Audio/Pause controls (>= 44px touch targets on mobile) */}
             <div className="justify-self-end flex items-center gap-2 sm:gap-3">
-              <div className="flex items-center gap-1.5" aria-label={`Escudos: ${hud.hp} de ${hud.maxHp}`}>
-                <div className="flex items-center gap-1">
-                  {Array.from({ length: hud.maxHp }).map((_, idx) => {
-                    const active = idx < hud.hp;
-                    const flashing = hud.damageFlashRatio > 0.15;
-                    return (
-                      <svg
-                        key={idx}
-                        viewBox="0 0 16 16"
-                        className="h-3.5 w-3.5 sm:h-4 sm:w-4"
-                        aria-hidden="true"
-                      >
-                        <polygon
-                          points="8,1 15,8 8,15 1,8"
-                          fill={active ? (flashing ? '#FF7B66' : '#E8B84B') : 'transparent'}
-                          stroke={
-                            flashing
-                              ? '#FF7B66'
-                              : active
-                                ? '#F4EFE6'
-                                : 'rgba(244,239,230,0.28)'
-                          }
-                          strokeWidth="1.4"
-                        />
-                      </svg>
-                    );
-                  })}
+              <div className="flex flex-col items-end gap-1">
+                <div className="flex items-center gap-1.5" aria-label={`Escudos: ${hud.hp} de ${hud.maxHp}`}>
+                  <div className="flex items-center gap-1">
+                    {Array.from({ length: hud.maxHp }).map((_, idx) => {
+                      const active = idx < hud.hp;
+                      const flashing = hud.damageFlashRatio > 0.15;
+                      const repairActive = hud.repairAnimRatio > 0.01;
+                      const repairProgress = Math.max(0, Math.min(1, 1 - hud.repairAnimRatio));
+                      const isJustRepaired = repairActive && idx === hud.hp - 1;
+                      const clipTop = Math.round((1 - repairProgress) * 14);
+                      return (
+                        <svg
+                          key={isJustRepaired ? `${idx}-repair-${hud.repairPulseId}` : idx}
+                          viewBox="0 0 16 16"
+                          className={`h-3.5 w-3.5 sm:h-4 sm:w-4 ${
+                            isJustRepaired ? 'animate-hull-diamond-repair' : ''
+                          }`}
+                          aria-hidden="true"
+                        >
+                          {isJustRepaired && (
+                            <defs>
+                              <clipPath id={`repair-fill-${idx}-${hud.repairPulseId}`}>
+                                <rect x="0" y={clipTop} width="16" height={16 - clipTop} />
+                              </clipPath>
+                            </defs>
+                          )}
+                          <polygon
+                            points="8,1 15,8 8,15 1,8"
+                            fill={
+                              isJustRepaired
+                                ? 'rgba(92, 225, 255, 0.24)'
+                                : active
+                                  ? flashing
+                                    ? '#FF7B66'
+                                    : repairActive
+                                      ? '#7AE4FF'
+                                      : '#E8B84B'
+                                  : 'transparent'
+                            }
+                            stroke={
+                              flashing
+                                ? '#FF7B66'
+                                : isJustRepaired || (repairActive && active)
+                                  ? '#7AE4FF'
+                                  : active
+                                    ? '#F4EFE6'
+                                    : 'rgba(244,239,230,0.28)'
+                            }
+                            strokeWidth="1.4"
+                          />
+                          {isJustRepaired && (
+                            <polygon
+                              points="8,1 15,8 8,15 1,8"
+                              fill={repairProgress > 0.8 ? '#E8B84B' : '#5CE1FF'}
+                              clipPath={`url(#repair-fill-${idx}-${hud.repairPulseId})`}
+                            />
+                          )}
+                        </svg>
+                      );
+                    })}
+                  </div>
+                  <span
+                    className={`hidden sm:inline font-mono text-xs tabular-nums transition-colors duration-100 ${
+                      hud.damageFlashRatio > 0.15
+                        ? 'text-[#FF7B66] font-semibold'
+                        : hud.repairAnimRatio > 0.01
+                          ? 'text-[#7AE4FF] font-semibold'
+                          : 'text-[#F4EFE6]/75'
+                    }`}
+                  >
+                    {hud.hp}/{hud.maxHp}
+                  </span>
                 </div>
-                <span
-                  className={`hidden sm:inline font-mono text-xs tabular-nums transition-colors duration-100 ${
-                    hud.damageFlashRatio > 0.15 ? 'text-[#FF7B66] font-semibold' : 'text-[#F4EFE6]/75'
-                  }`}
-                >
-                  {hud.hp}/{hud.maxHp}
-                </span>
+                {hud.repairAnimRatio > 0.01 && (
+                  <div className="flex items-center gap-1.5" role="status">
+                    <span className="font-mono text-[9px] sm:text-[10px] font-semibold tracking-wider text-[#7AE4FF]">
+                      REPARANDO CASCO
+                    </span>
+                    <div className="h-1 w-12 sm:w-16 overflow-hidden rounded-xs bg-[#0E2438] border border-[#5CE1FF]/35">
+                      <div
+                        className="h-full origin-left bg-[#7AE4FF] transition-transform duration-75"
+                        style={{
+                          transform: `scaleX(${Math.max(0.05, Math.min(1, 1 - hud.repairAnimRatio))})`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="pointer-events-auto flex items-center gap-1.5">
@@ -640,12 +759,12 @@ export default function App() {
       )}
 
       {/* PAUSE MODAL */}
-      {isPaused && !showSettings && (
-        <div className="animate-modal-backdrop absolute inset-0 z-30 flex items-center justify-center bg-[#0B1320]/78 p-4">
+      {isPaused && !showSettings && !showTutorial && (
+        <div className="animate-modal-backdrop absolute inset-0 z-30 flex items-center justify-center bg-[#0B1320]/78 p-3 sm:p-4">
           {!showLore ? (
             <div
               key="pause-main"
-              className="animate-modal-panel max-h-[92%] w-full max-w-sm overflow-y-auto touch-pan-y rounded-lg border border-[#E8B84B]/35 bg-[#101B2D] p-5 sm:p-7 text-center shadow-2xl"
+              className="animate-modal-panel max-h-[88dvh] w-full max-w-sm overflow-y-auto touch-pan-y rounded-lg border border-[#E8B84B]/35 bg-[#101B2D] p-5 sm:p-7 text-center shadow-2xl"
             >
               <h2 className="font-display text-2xl font-semibold tracking-[0.16em] text-[#F4EFE6]">
                 PAUSADO
@@ -695,32 +814,32 @@ export default function App() {
           ) : (
             <div
               key="pause-lore"
-              className="animate-modal-panel flex max-h-[84dvh] w-full max-w-lg flex-col rounded-lg border border-[#E8B84B]/35 bg-[#101B2D] p-5 sm:p-6 shadow-2xl"
+              className="animate-modal-panel flex max-h-[86dvh] w-full max-w-xl flex-col overflow-hidden rounded-lg border border-[#E8B84B]/35 bg-[#101B2D] p-4 sm:p-6 shadow-2xl"
             >
               {/* Header */}
-              <div className="flex items-center justify-between gap-3 border-b border-[#E8B84B]/18 pb-4">
+              <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[#E8B84B]/18 pb-3 sm:pb-4">
                 <button
                   type="button"
                   onClick={handleCloseLore}
                   onMouseEnter={playHover}
-                  className="inline-flex h-11 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-[#F4EFE6]/75 transition-colors duration-150 hover:text-[#E8B84B] whitespace-nowrap shrink-0 cursor-pointer"
+                  className="inline-flex h-10 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-[#F4EFE6]/75 transition-colors duration-150 hover:text-[#E8B84B] whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   <ArrowLeft className="h-4 w-4" />
                   Voltar
                 </button>
-                <h2 className="font-display text-lg sm:text-xl font-semibold tracking-[0.14em] text-[#F4EFE6] whitespace-nowrap">
+                <h2 className="font-display text-sm sm:text-lg font-semibold tracking-[0.12em] sm:tracking-[0.14em] text-[#F4EFE6] text-center truncate">
                   REGISTROS DE BORDO
                 </h2>
-                <div className="w-16 shrink-0" aria-hidden="true" />
+                <div className="w-12 sm:w-16 shrink-0" aria-hidden="true" />
               </div>
 
               {/* Segmented Filter Tabs */}
-              <div className="mt-4 grid grid-cols-2 gap-1 rounded-md bg-[#0B1320] p-1 border border-[#E8B84B]/18">
+              <div className="mt-3 sm:mt-4 grid shrink-0 grid-cols-2 gap-1 rounded-md bg-[#0B1320] p-1 border border-[#E8B84B]/18">
                 <button
                   type="button"
                   onClick={() => handleSelectLoreTab('mission')}
                   onMouseEnter={playHover}
-                  className={`h-10 rounded-sm text-xs font-semibold tracking-wide transition-colors duration-150 whitespace-nowrap cursor-pointer ${
+                  className={`h-9 sm:h-10 rounded-sm text-xs font-semibold tracking-wide transition-colors duration-150 whitespace-nowrap cursor-pointer ${
                     loreTab === 'mission'
                       ? 'bg-[#E8B84B] text-[#0B1320]'
                       : 'text-[#F4EFE6]/70 hover:text-[#F4EFE6]'
@@ -732,7 +851,7 @@ export default function App() {
                   type="button"
                   onClick={() => handleSelectLoreTab('sentinels')}
                   onMouseEnter={playHover}
-                  className={`h-10 rounded-sm text-xs font-semibold tracking-wide transition-colors duration-150 whitespace-nowrap cursor-pointer ${
+                  className={`h-9 sm:h-10 rounded-sm text-xs font-semibold tracking-wide transition-colors duration-150 whitespace-nowrap cursor-pointer ${
                     loreTab === 'sentinels'
                       ? 'bg-[#E8B84B] text-[#0B1320]'
                       : 'text-[#F4EFE6]/70 hover:text-[#F4EFE6]'
@@ -743,13 +862,13 @@ export default function App() {
               </div>
 
               {/* Scrollable Lore Entries */}
-              <div className="mt-4 flex-1 space-y-4 overflow-y-auto pr-1 touch-pan-y">
+              <div className="mt-3 sm:mt-4 min-h-0 flex-1 space-y-3 sm:space-y-4 overflow-y-auto pr-1 touch-pan-y">
                 {LORE_ENTRIES.filter((entry) => entry.category === loreTab).map((entry) => (
                   <article
                     key={entry.id}
-                    className="flex gap-4 border-b border-[#E8B84B]/12 pb-4 last:border-b-0 last:pb-0"
+                    className="flex gap-3 sm:gap-4 border-b border-[#E8B84B]/12 pb-3 sm:pb-4 last:border-b-0 last:pb-0"
                   >
-                    <div className="h-16 w-16 sm:h-20 sm:w-20 shrink-0 overflow-hidden rounded-md border border-[#E8B84B]/25 bg-[#0B1320]">
+                    <div className="h-14 w-14 sm:h-20 sm:w-20 shrink-0 overflow-hidden rounded-md border border-[#E8B84B]/25 bg-[#0B1320]">
                       <img
                         src={entry.imageSrc}
                         alt={entry.title}
@@ -758,11 +877,13 @@ export default function App() {
                       />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <h3 className="font-display text-base font-semibold tracking-wide text-[#F4EFE6]">
+                      <h3 className="font-display text-sm sm:text-base font-semibold tracking-wide text-[#F4EFE6]">
                         {entry.title}
                       </h3>
-                      <p className="mt-0.5 text-xs text-[#E8B84B]/80">{entry.classification}</p>
-                      <p className="mt-2 text-xs sm:text-sm leading-relaxed text-[#F4EFE6]/75">
+                      <p className="mt-0.5 text-[11px] sm:text-xs text-[#E8B84B]/80">
+                        {entry.classification}
+                      </p>
+                      <p className="mt-1.5 sm:mt-2 text-xs sm:text-sm leading-relaxed text-[#F4EFE6]/75">
                         {entry.summary}
                       </p>
                     </div>
@@ -776,8 +897,8 @@ export default function App() {
 
       {/* GAME OVER MODAL */}
       {isGameOver && (
-        <div className="animate-modal-backdrop absolute inset-0 z-30 flex items-center justify-center bg-[#0B1320]/80 p-4">
-          <div className="animate-modal-panel max-h-[92dvh] w-full max-w-md overflow-y-auto touch-pan-y rounded-lg border border-[#E8B84B]/35 bg-[#101B2D] p-5 sm:p-8 shadow-2xl">
+        <div className="animate-modal-backdrop absolute inset-0 z-30 flex items-center justify-center bg-[#0B1320]/80 p-3 sm:p-4">
+          <div className="animate-modal-panel max-h-[88dvh] w-full max-w-md overflow-y-auto touch-pan-y rounded-lg border border-[#E8B84B]/35 bg-[#101B2D] p-5 sm:p-8 shadow-2xl">
             <div className="text-center">
               <h2 className="font-display text-2xl sm:text-3xl font-semibold tracking-[0.14em] text-[#F4EFE6]">
                 FIM DE MISSÃO
@@ -842,10 +963,20 @@ export default function App() {
           </div>
         </div>
       )}
+      {/* POST-CUTSCENE CONTROLS TUTORIAL MODAL */}
+      <TutorialModal
+        open={showTutorial}
+        isTouch={isTouch}
+        disableFutureTutorial={disableFutureTutorial}
+        onToggleDisableFuture={handleToggleDisableFutureTutorial}
+        onConfirm={handleConfirmTutorial}
+        onHover={playHover}
+      />
+
       {/* SETTINGS MODAL */}
       <SettingsModal
         open={showSettings}
-        rotated90={forceLandscapeStage}
+        rotated90={false}
         muted={muted}
         audioSettings={audioSettings}
         gameplaySettings={gameplaySettings}

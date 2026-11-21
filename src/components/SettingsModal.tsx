@@ -260,8 +260,8 @@ export function SettingsModal({
           </button>
         </div>
 
-        {/* Always 2-column horizontal layout (Solaris stage is always landscape) */}
-        <div className="grid min-h-0 flex-1 grid-cols-2 gap-4 overflow-y-auto touch-pan-y px-4 py-3 sm:gap-6 sm:px-5 sm:py-4">
+        {/* Responsive 1-column portrait / 2-column landscape layout */}
+        <div className="grid min-h-0 flex-1 grid-cols-1 sm:grid-cols-2 gap-4 overflow-y-auto touch-pan-y px-4 py-3 sm:gap-6 sm:px-5 sm:py-4">
           {/* Column 1: Audio Mixer */}
           <section className="space-y-2.5">
             <div className="flex items-center justify-between border-b border-[#E8B84B]/15 pb-1.5">

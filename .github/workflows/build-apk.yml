@@ -41,14 +41,6 @@ jobs:
           }
           EOF
           npx cap add android
-          if [ -f "icon.png" ]; then
-            rm -rf android/app/src/main/res/mipmap-anydpi-v26
-            for dir in android/app/src/main/res/mipmap-*; do
-              cp icon.png "$dir/ic_launcher.png"
-              cp icon.png "$dir/ic_launcher_round.png"
-              cp icon.png "$dir/ic_launcher_foreground.png"
-            done
-          fi
           npx cap sync
 
       - name: Compilar APK

@@ -1,4 +1,4 @@
-export type GameState = 'TITLE_MENU' | 'PLAYING' | 'PAUSED' | 'GAME_OVER';
+export type GameState = 'TITLE_MENU' | 'INTRO_CUTSCENE' | 'PLAYING' | 'PAUSED' | 'GAME_OVER';
 
 export type EnemyType = 'SCOUT' | 'STRIKER' | 'BASTION' | 'SPLITTER' | 'MINI_SCOUT';
 
@@ -22,6 +22,8 @@ export interface HudSnapshot {
   newRecord: boolean;
   damageFlashRatio: number; // 0..1
   damagePulseId: number;
+  repairAnimRatio: number; // 0..1
+  repairPulseId: number;
 }
 
 export interface Enemy {
@@ -61,6 +63,7 @@ export interface Spark {
   vy: number;
   life: number;
   value: number;
+  kind: 'overdrive' | 'repair';
 }
 
 export interface Particle {

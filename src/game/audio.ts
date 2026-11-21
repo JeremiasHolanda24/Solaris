@@ -44,6 +44,8 @@ export class GameAudio {
   private voiceLoading = false;
   private activeWarningSource: AudioBufferSourceNode | null = null;
   private activeEventVoiceSource: AudioBufferSourceNode | null = null;
+  private cutsceneMasterGain: GainNode | null = null;
+  private cutsceneStopNodes: Array<{ stop: (when?: number) => void }> = [];
 
   constructor() {
     try {
@@ -100,6 +102,7 @@ export class GameAudio {
       this.stopWarningVoice();
       this.stopEventVoice();
       this.stopPauseHum();
+      this.stopCutsceneAudio();
     }
     this.applyBusGains();
     try {
@@ -415,6 +418,83 @@ export class GameAudio {
       gain.connect(this.getBus('sfx'));
       osc.start(t);
       osc.stop(t + 0.37);
+    });
+  }
+
+  public playHullPressurize(isFullHeal = false): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const dur = 0.85;
+
+    // 1. Subtle pneumatic airlock pressurization hiss (soft bandpass noise sweeping inward)
+    const bufferSize = Math.floor(ctx.sampleRate * dur);
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * 0.55;
+    }
+
+    const noise = ctx.createBufferSource();
+    noise.buffer = buffer;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(680, now);
+    filter.frequency.exponentialRampToValueAtTime(2150, now + 0.32);
+    filter.frequency.exponentialRampToValueAtTime(920, now + dur);
+    filter.Q.setValueAtTime(2.6, now);
+
+    const nGain = ctx.createGain();
+    nGain.gain.setValueAtTime(0.001, now);
+    nGain.gain.linearRampToValueAtTime(0.036, now + 0.12);
+    nGain.gain.linearRampToValueAtTime(0.024, now + 0.45);
+    nGain.gain.exponentialRampToValueAtTime(0.0008, now + dur);
+
+    noise.connect(filter);
+    filter.connect(nGain);
+    nGain.connect(this.getBus('sfx'));
+    noise.start(now);
+    noise.stop(now + dur + 0.02);
+
+    // 2. Smooth ascending nanite-seal cabin pressure tone
+    const sealOsc = ctx.createOscillator();
+    const sealGain = ctx.createGain();
+    const sealLp = ctx.createBiquadFilter();
+    sealOsc.type = 'triangle';
+    sealOsc.frequency.setValueAtTime(246.94, now);
+    sealOsc.frequency.exponentialRampToValueAtTime(493.88, now + 0.34);
+    sealOsc.frequency.exponentialRampToValueAtTime(isFullHeal ? 739.99 : 659.25, now + 0.72);
+
+    sealLp.type = 'lowpass';
+    sealLp.frequency.setValueAtTime(1400, now);
+
+    sealGain.gain.setValueAtTime(0.001, now);
+    sealGain.gain.linearRampToValueAtTime(0.044, now + 0.08);
+    sealGain.gain.exponentialRampToValueAtTime(0.001, now + 0.76);
+
+    sealOsc.connect(sealLp);
+    sealLp.connect(sealGain);
+    sealGain.connect(this.getBus('sfx'));
+    sealOsc.start(now);
+    sealOsc.stop(now + 0.78);
+
+    // 3. Delicate crystalline seal confirmation chimes staggered across progressive repair
+    const chimes = isFullHeal ? [783.99, 1046.5] : [659.25, 987.77];
+    chimes.forEach((freq, idx) => {
+      const t = now + 0.16 + idx * 0.24;
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, t);
+      g.gain.setValueAtTime(0.001, t);
+      g.gain.linearRampToValueAtTime(0.032, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0008, t + 0.32);
+      osc.connect(g);
+      g.connect(this.getBus('sfx'));
+      osc.start(t);
+      osc.stop(t + 0.34);
     });
   }
 
@@ -874,5 +954,185 @@ export class GameAudio {
       osc.start(t);
       osc.stop(t + 0.38);
     });
+  }
+
+  public stopCutsceneAudio(): void {
+    if (this.cutsceneMasterGain && this.ctx) {
+      const now = this.ctx.currentTime;
+      try {
+        this.cutsceneMasterGain.gain.cancelScheduledValues(now);
+        this.cutsceneMasterGain.gain.setValueAtTime(
+          Math.max(0.0005, this.cutsceneMasterGain.gain.value),
+          now
+        );
+        this.cutsceneMasterGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
+      } catch {
+        // Ignore gain automation error
+      }
+    }
+    const stopAt = this.ctx ? this.ctx.currentTime + 0.1 : 0;
+    for (const node of this.cutsceneStopNodes) {
+      try {
+        node.stop(stopAt);
+      } catch {
+        // Ignore already stopped audio nodes
+      }
+    }
+    this.cutsceneStopNodes = [];
+    this.cutsceneMasterGain = null;
+  }
+
+  public playCutsceneWarpSequence(): void {
+    this.stopCutsceneAudio();
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const bus = ctx.createGain();
+    bus.gain.setValueAtTime(1, now);
+    bus.connect(this.getBus('sfx'));
+    this.cutsceneMasterGain = bus;
+
+    // 1. Orbit turbine spool-up (0.0s -> 1.75s) + hyper-warp surge (1.75s -> 3.35s)
+    const drone = ctx.createOscillator();
+    const drone2 = ctx.createOscillator();
+    const filter = ctx.createBiquadFilter();
+    const droneGain = ctx.createGain();
+
+    drone.type = 'sawtooth';
+    drone.frequency.setValueAtTime(58, now);
+    drone.frequency.exponentialRampToValueAtTime(124, now + 1.72);
+    drone.frequency.exponentialRampToValueAtTime(420, now + 1.98);
+    drone.frequency.exponentialRampToValueAtTime(92, now + 3.32);
+
+    drone2.type = 'triangle';
+    drone2.frequency.setValueAtTime(116, now);
+    drone2.frequency.exponentialRampToValueAtTime(248, now + 1.72);
+    drone2.frequency.exponentialRampToValueAtTime(620, now + 2.02);
+    drone2.frequency.exponentialRampToValueAtTime(140, now + 3.32);
+
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(210, now);
+    filter.frequency.exponentialRampToValueAtTime(680, now + 1.7);
+    filter.frequency.exponentialRampToValueAtTime(2800, now + 1.92);
+    filter.frequency.exponentialRampToValueAtTime(340, now + 3.3);
+    filter.Q.setValueAtTime(2.4, now);
+
+    droneGain.gain.setValueAtTime(0.001, now);
+    droneGain.gain.linearRampToValueAtTime(0.08, now + 0.35);
+    droneGain.gain.linearRampToValueAtTime(0.13, now + 1.72);
+    droneGain.gain.linearRampToValueAtTime(0.19, now + 1.84);
+    droneGain.gain.exponentialRampToValueAtTime(0.001, now + 3.35);
+
+    drone.connect(filter);
+    drone2.connect(filter);
+    filter.connect(droneGain);
+    droneGain.connect(bus);
+
+    drone.start(now);
+    drone2.start(now);
+    drone.stop(now + 3.4);
+    drone2.stop(now + 3.4);
+
+    // 2. Hyper-warp launch bass boom + filtered noise rush at t = +1.75s
+    const launchAt = now + 1.75;
+    const sub = ctx.createOscillator();
+    const subGain = ctx.createGain();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(160, launchAt);
+    sub.frequency.exponentialRampToValueAtTime(34, launchAt + 0.72);
+    subGain.gain.setValueAtTime(0.0001, now);
+    subGain.gain.setValueAtTime(0.24, launchAt);
+    subGain.gain.exponentialRampToValueAtTime(0.001, launchAt + 0.78);
+    sub.connect(subGain);
+    subGain.connect(bus);
+    sub.start(launchAt);
+    sub.stop(launchAt + 0.8);
+
+    const dur = 1.45;
+    const bufferSize = Math.floor(ctx.sampleRate * dur);
+    const noiseBuf = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const ch = noiseBuf.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      ch[i] = (Math.random() * 2 - 1) * 0.65;
+    }
+    const noise = ctx.createBufferSource();
+    noise.buffer = noiseBuf;
+    const nFilter = ctx.createBiquadFilter();
+    nFilter.type = 'bandpass';
+    nFilter.frequency.setValueAtTime(1800, launchAt);
+    nFilter.frequency.exponentialRampToValueAtTime(280, launchAt + dur);
+    nFilter.Q.setValueAtTime(1.1, launchAt);
+    const nGain = ctx.createGain();
+    nGain.gain.setValueAtTime(0.001, launchAt);
+    nGain.gain.linearRampToValueAtTime(0.14, launchAt + 0.06);
+    nGain.gain.exponentialRampToValueAtTime(0.001, launchAt + dur);
+    noise.connect(nFilter);
+    nFilter.connect(nGain);
+    nGain.connect(bus);
+    noise.start(launchAt);
+    noise.stop(launchAt + dur + 0.02);
+
+    this.cutsceneStopNodes = [drone, drone2, sub, noise];
+  }
+
+  public playCutsceneRiftExit(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const sub = ctx.createOscillator();
+    const subGain = ctx.createGain();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(140, now);
+    sub.frequency.exponentialRampToValueAtTime(38, now + 0.55);
+    subGain.gain.setValueAtTime(0.22, now);
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.58);
+    sub.connect(subGain);
+    subGain.connect(this.getBus('sfx'));
+    sub.start(now);
+    sub.stop(now + 0.6);
+
+    const chime = ctx.createOscillator();
+    const chimeGain = ctx.createGain();
+    chime.type = 'triangle';
+    chime.frequency.setValueAtTime(523.25, now);
+    chime.frequency.exponentialRampToValueAtTime(261.63, now + 0.45);
+    chimeGain.gain.setValueAtTime(0.08, now);
+    chimeGain.gain.exponentialRampToValueAtTime(0.001, now + 0.48);
+    chime.connect(chimeGain);
+    chimeGain.connect(this.getBus('sfx'));
+    chime.start(now);
+    chime.stop(now + 0.5);
+  }
+
+  public playSlowMoExplosion(): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const sub = ctx.createOscillator();
+    const subGain = ctx.createGain();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(115, now);
+    sub.frequency.exponentialRampToValueAtTime(26, now + 0.85);
+    subGain.gain.setValueAtTime(0.24, now);
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.88);
+    sub.connect(subGain);
+    subGain.connect(this.getBus('sfx'));
+    sub.start(now);
+    sub.stop(now + 0.9);
+
+    const lowTone = ctx.createOscillator();
+    const lowGain = ctx.createGain();
+    lowTone.type = 'triangle';
+    lowTone.frequency.setValueAtTime(240, now);
+    lowTone.frequency.exponentialRampToValueAtTime(64, now + 0.65);
+    lowGain.gain.setValueAtTime(0.09, now);
+    lowGain.gain.exponentialRampToValueAtTime(0.001, now + 0.68);
+    lowTone.connect(lowGain);
+    lowGain.connect(this.getBus('sfx'));
+    lowTone.start(now);
+    lowTone.stop(now + 0.7);
   }
 }

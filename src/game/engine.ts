@@ -63,6 +63,8 @@ export class SolarisEngine {
   private ctx: CanvasRenderingContext2D;
   private audio: GameAudio;
   private onHudUpdate: (snapshot: HudSnapshot) => void;
+  private onCutsceneComplete?: () => void;
+  private tutorialActive = false;
 
   private rafId: number | null = null;
   private lastTime = 0;
@@ -95,6 +97,10 @@ export class SolarisEngine {
   private damageFlashTimer = 0;
   private readonly damageFlashDuration = 0.38;
   private damagePulseId = 0;
+  private repairAnimTimer = 0;
+  private readonly repairAnimDuration = 1.4;
+  private repairPulseId = 0;
+  private repairMoteAccum = 0;
   private ambientTime = 0;
 
   // Dramatic Player Destruction Sequence
@@ -194,10 +200,103 @@ export class SolarisEngine {
   private screenShakeScale = 1;
   private showOffscreenIndicators = true;
 
+  // Cinematic Intro Cutscene state
+  private cutsceneTime = 0;
+  private readonly cutsceneDuration = 6.35;
+  private cutsceneTimeScale = 1;
+  private cutsceneFlash = 0;
+  private cutsceneFlags = {
+    launched: false,
+    riftEntered: false,
+    shot1: false,
+    shot2: false,
+    boom1: false,
+    boom2: false,
+  };
+  private cutsceneSquadron: Array<{
+    enemy: Enemy;
+    alive: boolean;
+    alpha: number;
+    startX: number;
+    startY: number;
+    hoverX: number;
+    hoverY: number;
+    exitX: number;
+    exitY: number;
+  }> = [];
+  private cutsceneBolts: Array<{
+    active: boolean;
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    tx: number;
+    ty: number;
+  }> = [
+    { active: false, x: 0, y: 0, vx: 0, vy: 0, tx: 0, ty: 0 },
+    { active: false, x: 0, y: 0, vx: 0, vy: 0, tx: 0, ty: 0 },
+  ];
+
+  // Randomized per-match Combat Zone Scenery (guaranteed separated positions)
+  private combatNebula: {
+    normX: number;
+    normY: number;
+    scale: number;
+    rotation: number;
+    coreRgb: string;
+    midRgb: string;
+    accentRgb: string;
+    lobes: Array<{
+      dx: number;
+      dy: number;
+      rx: number;
+      ry: number;
+      rot: number;
+      colorIdx: 0 | 1 | 2;
+      alpha: number;
+    }>;
+  } = {
+    normX: 0.25,
+    normY: 0.3,
+    scale: 0.44,
+    rotation: 0.3,
+    coreRgb: '109, 40, 217',
+    midRgb: '217, 70, 239',
+    accentRgb: '56, 189, 248',
+    lobes: [],
+  };
+
+  private combatPlanet: {
+    normX: number;
+    normY: number;
+    scale: number;
+    lightAngle: number;
+    litHex: string;
+    midHex: string;
+    darkHex: string;
+    rimRgb: string;
+    bandRgb: string;
+    hasRings: boolean;
+    ringTilt: number;
+  } = {
+    normX: 0.78,
+    normY: 0.72,
+    scale: 0.1,
+    lightAngle: -0.6,
+    litHex: '#FB923C',
+    midHex: '#C2410C',
+    darkHex: '#271007',
+    rimRgb: '253, 186, 116',
+    bandRgb: '255, 237, 213',
+    hasRings: true,
+    ringTilt: -0.32,
+  };
+
   constructor(
     canvas: HTMLCanvasElement,
     audio: GameAudio,
-    onHudUpdate: (snapshot: HudSnapshot) => void
+    onHudUpdate: (snapshot: HudSnapshot) => void,
+    onCutsceneComplete?: () => void
   ) {
     this.canvas = canvas;
     const context = canvas.getContext('2d', { alpha: false });
@@ -207,6 +306,8 @@ export class SolarisEngine {
     this.ctx = context;
     this.audio = audio;
     this.onHudUpdate = onHudUpdate;
+    this.onCutsceneComplete = onCutsceneComplete;
+    this.generateCombatScenery();
 
     try {
       const saved = Number(localStorage.getItem(HIGH_SCORE_KEY) || '0');
@@ -256,6 +357,7 @@ export class SolarisEngine {
         vy: 0,
         life: 0,
         value: 15,
+        kind: 'overdrive',
       });
     }
     for (let i = 0; i < FLOATING_TEXT_POOL_SIZE; i++) {
@@ -413,11 +515,94 @@ export class SolarisEngine {
         enqueue(x, y - 1);
       }
 
+      // For PLAYER_FRONT, peel & un-premultiply the dark exterior black-to-amber bloom
+      // along the sunlit outer rim (nose tip to wings) without entering interior dark intakes.
+      let haloProcessed: Uint8Array | null = null;
+      if (key === 'PLAYER_FRONT') {
+        haloProcessed = new Uint8Array(totalPixels);
+        const haloVisited = new Uint8Array(totalPixels);
+        const hQueue = new Int32Array(totalPixels);
+        let hHead = 0;
+        let hTail = 0;
+        const maxHaloX = Math.floor(outW * 0.62);
+
+        for (let y = 1; y < outH - 1; y++) {
+          for (let x = 1; x < maxHaloX; x++) {
+            const idx = y * outW + x;
+            if (visited[idx]) continue;
+            if (visited[idx - 1] || visited[idx + 1] || visited[idx - outW] || visited[idx + outW]) {
+              haloVisited[idx] = 1;
+              hQueue[hTail++] = idx;
+            }
+          }
+        }
+
+        while (hHead < hTail) {
+          const idx = hQueue[hHead++];
+          const o = idx * 4;
+          const r = data[o];
+          const g = data[o + 1];
+          const b = data[o + 2];
+          const maxC = r > g ? (r > b ? r : b) : g > b ? g : b;
+          const isDarkFringe = maxC < 24 && b < 14;
+          const isWarmBloom = r < 155 && b <= 21 && r >= g * 1.48 && r - b >= 8;
+          if (!isDarkFringe && !isWarmBloom) continue;
+
+          if (r <= 44) {
+            data[o + 3] = 0;
+            visited[idx] = 1;
+          } else {
+            const t = (r - 44) / (155 - 44);
+            const alphaF = t * t * 0.88;
+            data[o + 3] = Math.round(alphaF * 255);
+            if (alphaF > 0.02) {
+              const denom = Math.max(0.32, alphaF);
+              data[o] = Math.min(255, Math.round(r / denom));
+              data[o + 1] = Math.min(255, Math.round(g / denom));
+              data[o + 2] = Math.min(255, Math.round(b / denom));
+            }
+          }
+          haloProcessed[idx] = 1;
+
+          const x = idx % outW;
+          const y = (idx - x) / outW;
+          if (x + 1 < maxHaloX) {
+            const n = idx + 1;
+            if (!visited[n] && !haloVisited[n]) {
+              haloVisited[n] = 1;
+              hQueue[hTail++] = n;
+            }
+          }
+          if (x - 1 >= 0) {
+            const n = idx - 1;
+            if (!visited[n] && !haloVisited[n]) {
+              haloVisited[n] = 1;
+              hQueue[hTail++] = n;
+            }
+          }
+          if (y + 1 < outH) {
+            const n = idx + outW;
+            if (!visited[n] && !haloVisited[n]) {
+              haloVisited[n] = 1;
+              hQueue[hTail++] = n;
+            }
+          }
+          if (y - 1 >= 0) {
+            const n = idx - outW;
+            if (!visited[n] && !haloVisited[n]) {
+              haloVisited[n] = 1;
+              hQueue[hTail++] = n;
+            }
+          }
+        }
+      }
+
       // Soften 1px anti-alias fringe touching transparent exterior
       for (let y = 1; y < outH - 1; y++) {
         for (let x = 1; x < outW - 1; x++) {
           const idx = y * outW + x;
-          if (visited[idx]) continue;
+          if (visited[idx] || (haloProcessed && haloProcessed[idx])) continue;
+          if (key === 'PLAYER_FRONT' && x >= outW * 0.72 && y >= outH * 0.5) continue;
           const touchesBg =
             visited[idx - 1] || visited[idx + 1] || visited[idx - outW] || visited[idx + outW];
           if (touchesBg) {
@@ -492,7 +677,6 @@ export class SolarisEngine {
 
   public startNewGame(): void {
     this.audio.unlock();
-    this.state = 'PLAYING';
     this.score = 0;
     this.newRecord = false;
     this.combo = 1;
@@ -503,6 +687,8 @@ export class SolarisEngine {
     this.hitstopTimer = 0;
     this.shakeIntensity = 0;
     this.damageFlashTimer = 0;
+    this.repairAnimTimer = 0;
+    this.repairMoteAccum = 0;
 
     this.playerDying = false;
     this.playerDetonated = false;
@@ -531,9 +717,190 @@ export class SolarisEngine {
     for (let i = 0; i < PARTICLE_POOL_SIZE; i++) this.particles[i].active = false;
     for (let i = 0; i < SHOCKWAVE_POOL_SIZE; i++) this.shockwaves[i].active = false;
 
-    this.prepareWave(1);
-    this.spawnShockwave(this.player.x, this.player.y, 120, PALETTE.brass, 2.5, 0.45, true);
+    this.generateCombatScenery();
+    this.initIntroCutscene();
+    this.state = 'INTRO_CUTSCENE';
+    this.audio.playCutsceneWarpSequence();
     this.emitHud();
+  }
+
+  public setTutorialActive(active: boolean): void {
+    this.tutorialActive = active;
+  }
+
+  private generateCombatScenery(): void {
+    const nebulaPalettes = [
+      { coreRgb: '124, 58, 237', midRgb: '217, 70, 239', accentRgb: '56, 189, 248' },
+      { coreRgb: '13, 148, 136', midRgb: '62, 193, 176', accentRgb: '96, 165, 250' },
+      { coreRgb: '217, 119, 6', midRgb: '225, 29, 72', accentRgb: '245, 158, 11' },
+      { coreRgb: '29, 78, 216', midRgb: '6, 182, 212', accentRgb: '167, 139, 250' },
+      { coreRgb: '190, 24, 93', midRgb: '124, 58, 237', accentRgb: '244, 114, 182' },
+      { coreRgb: '180, 83, 9', midRgb: '192, 132, 252', accentRgb: '56, 189, 248' },
+    ];
+    const nebPal = nebulaPalettes[Math.floor(Math.random() * nebulaPalettes.length)];
+    const nebX = 0.14 + Math.random() * 0.72;
+    const nebY = 0.16 + Math.random() * 0.68;
+    const nebScale = 0.34 + Math.random() * 0.24;
+    const lobes: typeof this.combatNebula.lobes = [];
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2 + (Math.random() - 0.5) * 0.6;
+      const dist = i === 0 ? 0.04 : 0.16 + Math.random() * 0.24;
+      lobes.push({
+        dx: Math.cos(a) * dist,
+        dy: Math.sin(a) * dist,
+        rx: 0.45 + Math.random() * 0.45,
+        ry: 0.28 + Math.random() * 0.34,
+        rot: Math.random() * Math.PI,
+        colorIdx: (i % 3) as 0 | 1 | 2,
+        alpha: i === 0 ? 0.16 : 0.08 + Math.random() * 0.08,
+      });
+    }
+    this.combatNebula = {
+      normX: nebX,
+      normY: nebY,
+      scale: nebScale,
+      rotation: Math.random() * Math.PI * 2,
+      coreRgb: nebPal.coreRgb,
+      midRgb: nebPal.midRgb,
+      accentRgb: nebPal.accentRgb,
+      lobes,
+    };
+
+    const planetPalettes = [
+      { litHex: '#FB923C', midHex: '#C2410C', darkHex: '#250F06', rimRgb: '253, 186, 116', bandRgb: '255, 237, 213' },
+      { litHex: '#38BDF8', midHex: '#1D4ED8', darkHex: '#0A152E', rimRgb: '125, 211, 252', bandRgb: '224, 242, 254' },
+      { litHex: '#34D399', midHex: '#065F46', darkHex: '#04241B', rimRgb: '110, 231, 183', bandRgb: '209, 250, 229' },
+      { litHex: '#F87171', midHex: '#991B1B', darkHex: '#24090A', rimRgb: '252, 165, 165', bandRgb: '254, 226, 226' },
+      { litHex: '#C084FC', midHex: '#5B21B6', darkHex: '#170B33', rimRgb: '221, 214, 254', bandRgb: '243, 232, 255' },
+      { litHex: '#E8B84B', midHex: '#92400E', darkHex: '#241305', rimRgb: '253, 230, 138', bandRgb: '254, 243, 199' },
+    ];
+    const plPal = planetPalettes[Math.floor(Math.random() * planetPalettes.length)];
+
+    // Guarantee Planet & Nebula NEVER occupy the same region of the combat zone
+    let plX = nebX < 0.5 ? 0.78 : 0.22;
+    let plY = nebY < 0.5 ? 0.76 : 0.24;
+    for (let attempt = 0; attempt < 48; attempt++) {
+      const candX = 0.14 + Math.random() * 0.72;
+      const candY = 0.16 + Math.random() * 0.68;
+      if (Math.hypot(candX - nebX, candY - nebY) >= 0.48) {
+        plX = candX;
+        plY = candY;
+        break;
+      }
+    }
+
+    this.combatPlanet = {
+      normX: plX,
+      normY: plY,
+      scale: 0.068 + Math.random() * 0.075,
+      lightAngle: Math.random() * Math.PI * 2,
+      litHex: plPal.litHex,
+      midHex: plPal.midHex,
+      darkHex: plPal.darkHex,
+      rimRgb: plPal.rimRgb,
+      bandRgb: plPal.bandRgb,
+      hasRings: Math.random() < 0.58,
+      ringTilt: (Math.random() - 0.5) * 1.15,
+    };
+  }
+
+  public skipCutscene(): void {
+    if (this.state !== 'INTRO_CUTSCENE') return;
+    this.audio.stopCutsceneAudio();
+    this.finishCutsceneToGameplay(true);
+  }
+
+  private initIntroCutscene(): void {
+    const w = this.width;
+    const h = this.height;
+    this.cutsceneTime = 0;
+    this.cutsceneTimeScale = 1;
+    this.cutsceneFlash = 0;
+    this.cutsceneFlags = {
+      launched: false,
+      riftEntered: false,
+      shot1: false,
+      shot2: false,
+      boom1: false,
+      boom2: false,
+    };
+    this.cutsceneBolts[0].active = false;
+    this.cutsceneBolts[1].active = false;
+
+    const specs: Array<{
+      id: number;
+      type: EnemyType;
+      sx: number;
+      sy: number;
+      hx: number;
+      hy: number;
+      ex: number;
+      ey: number;
+      r: number;
+    }> = [
+      { id: 901, type: 'SCOUT', sx: 1.06, sy: 0.16, hx: 0.67, hy: 0.34, ex: 0.67, ey: 0.34, r: 16 },
+      { id: 902, type: 'SCOUT', sx: 1.12, sy: 0.30, hx: 0.74, hy: 0.44, ex: 0.74, ey: 0.44, r: 16 },
+      { id: 903, type: 'STRIKER', sx: 1.16, sy: 0.12, hx: 0.80, hy: 0.27, ex: 1.16, ey: 0.14, r: 18 },
+      { id: 904, type: 'BASTION', sx: 1.22, sy: 0.44, hx: 0.86, hy: 0.56, ex: 1.18, ey: 0.66, r: 25 },
+    ];
+
+    this.cutsceneSquadron = specs.map((s) => ({
+      enemy: {
+        id: s.id,
+        type: s.type,
+        x: w * s.sx,
+        y: h * s.sy,
+        vx: -180,
+        vy: 90,
+        angle: Math.PI * 0.82,
+        radius: s.r,
+        hp: 3,
+        maxHp: 3,
+        hitFlash: 0,
+        aiState: 'APPROACH',
+        aiTimer: 1,
+        targetAngle: Math.PI * 0.82,
+        spin: 0,
+      },
+      alive: true,
+      alpha: 1,
+      startX: w * s.sx,
+      startY: h * s.sy,
+      hoverX: w * s.hx,
+      hoverY: h * s.hy,
+      exitX: w * s.ex,
+      exitY: h * s.ey,
+    }));
+  }
+
+  private finishCutsceneToGameplay(skipped: boolean): void {
+    this.state = 'PLAYING';
+    this.cutsceneTimeScale = 1;
+    this.cutsceneFlash = 0;
+    this.cutsceneBolts[0].active = false;
+    this.cutsceneBolts[1].active = false;
+    this.cutsceneSquadron = [];
+
+    this.player.x = this.width / 2;
+    this.player.y = this.height / 2;
+    this.player.vx = 0;
+    this.player.vy = 0;
+    this.player.angle = -Math.PI / 2;
+    this.player.invulnTimer = 1.1;
+    this.player.scaleX = 1;
+    this.player.scaleY = 1;
+    this.player.recoil = 0;
+
+    if (skipped) {
+      this.shakeIntensity = 0;
+      for (let i = 0; i < PARTICLE_POOL_SIZE; i++) this.particles[i].active = false;
+      for (let i = 0; i < SHOCKWAVE_POOL_SIZE; i++) this.shockwaves[i].active = false;
+      this.spawnShockwave(this.player.x, this.player.y, 120, PALETTE.brass, 2.5, 0.45, true);
+    }
+
+    this.prepareWave(1);
+    this.emitHud();
+    this.onCutsceneComplete?.();
   }
 
   public togglePause(): void {
@@ -550,9 +917,11 @@ export class SolarisEngine {
   }
 
   public returnToTitle(): void {
+    this.audio.stopCutsceneAudio();
     this.state = 'TITLE_MENU';
     this.playerDying = false;
     this.playerDetonated = false;
+    this.cutsceneSquadron = [];
     this.clearAllInputs();
     this.releaseAllEntities();
     this.waveBanner = null;
@@ -639,7 +1008,15 @@ export class SolarisEngine {
     this.bullets.push(b);
   }
 
-  private spawnSpark(x: number, y: number, vx: number, vy: number, life: number, value: number): void {
+  private spawnSpark(
+    x: number,
+    y: number,
+    vx: number,
+    vy: number,
+    life: number,
+    value: number,
+    kind: 'overdrive' | 'repair' = 'overdrive'
+  ): void {
     const s = this.freeSparks.pop();
     if (!s) return;
     s.x = x;
@@ -648,6 +1025,7 @@ export class SolarisEngine {
     s.vy = vy;
     s.life = life;
     s.value = value;
+    s.kind = kind;
     this.sparks.push(s);
   }
 
@@ -752,8 +1130,19 @@ export class SolarisEngine {
     }
 
     if (code === 'Escape' || code === 'KeyP') {
+      if (this.tutorialActive) return;
       if (this.state === 'PLAYING' || this.state === 'PAUSED') {
         this.togglePause();
+      }
+      return;
+    }
+
+    if (this.state === 'INTRO_CUTSCENE') {
+      if (
+        (code === 'Space' || code === 'Enter' || code === 'Escape') &&
+        this.cutsceneTime > 0.25
+      ) {
+        this.skipCutscene();
       }
       return;
     }
@@ -1307,6 +1696,35 @@ export class SolarisEngine {
       }
     }
 
+    if (this.repairAnimTimer > 0) {
+      this.repairAnimTimer = Math.max(0, this.repairAnimTimer - dt);
+      if (this.state === 'PLAYING' && !this.playerDying) {
+        this.repairMoteAccum += dt;
+        while (this.repairMoteAccum >= 0.055) {
+          this.repairMoteAccum -= 0.055;
+          const ang = Math.random() * Math.PI * 2;
+          const r = 18 + Math.random() * 14;
+          const px = this.player.x + Math.cos(ang) * r;
+          const py = this.player.y + Math.sin(ang) * r;
+          this.spawnParticle(
+            px,
+            py,
+            -Math.cos(ang) * 28 + this.player.vx * 0.45,
+            -Math.sin(ang) * 28 + this.player.vy * 0.45,
+            2.1 + Math.random() * 1.4,
+            0.38,
+            Math.random() < 0.5 ? '#7AE4FF' : '#38BDF8',
+            0.94,
+            'star',
+            -1.5
+          );
+        }
+      }
+      if (this.repairAnimTimer === 0) {
+        this.emitHud();
+      }
+    }
+
     if (this.state === 'TITLE_MENU') {
       for (const ws of this.warpStreaks) {
         ws.z -= ws.speed * dt;
@@ -1316,6 +1734,11 @@ export class SolarisEngine {
         }
       }
       this.updateParticlesAndWaves(dt);
+      return;
+    }
+
+    if (this.state === 'INTRO_CUTSCENE') {
+      this.updateIntroCutscene(dt);
       return;
     }
 
@@ -2005,7 +2428,31 @@ export class SolarisEngine {
     for (let s = 0; s < sparkCount; s++) {
       const a = Math.random() * Math.PI * 2;
       const spd = 70 + Math.random() * 80;
-      this.spawnSpark(ex, ey, Math.cos(a) * spd, Math.sin(a) * spd, 8.0, 15);
+      this.spawnSpark(ex, ey, Math.cos(a) * spd, Math.sin(a) * spd, 8.0, 15, 'overdrive');
+    }
+
+    if (this.player.hp < this.player.maxHp) {
+      let activeRepairCores = 0;
+      for (let i = 0; i < this.sparks.length; i++) {
+        if (this.sparks[i].kind === 'repair') activeRepairCores++;
+      }
+      // Probabilistic repair core drop — never guaranteed even when damaged
+      if (activeRepairCores < 1) {
+        const criticalBonus = this.player.hp <= 1 ? 0.08 : 0;
+        const repairChance =
+          etype === 'BASTION' || etype === 'SPLITTER'
+            ? 0.26 + criticalBonus
+            : etype === 'STRIKER'
+              ? 0.12 + criticalBonus * 0.75
+              : etype === 'SCOUT'
+                ? 0.05 + criticalBonus * 0.5
+                : 0;
+        if (Math.random() < repairChance) {
+          const a = Math.random() * Math.PI * 2;
+          const spd = 42 + Math.random() * 44;
+          this.spawnSpark(ex, ey, Math.cos(a) * spd, Math.sin(a) * spd, 11.5, 50, 'repair');
+        }
+      }
     }
 
     if (etype === 'SPLITTER') {
@@ -2087,8 +2534,9 @@ export class SolarisEngine {
       const dy = p.y - s.y;
       const dist = Math.hypot(dx, dy) || 1;
 
-      if (dist < 185) {
-        const pull = (1 - dist / 185) * 1450;
+      const pullRadius = s.kind === 'repair' ? 205 : 185;
+      if (dist < pullRadius) {
+        const pull = (1 - dist / pullRadius) * 1450;
         s.vx += (dx / dist) * pull * dt;
         s.vy += (dy / dist) * pull * dt;
       }
@@ -2101,21 +2549,50 @@ export class SolarisEngine {
 
       if (dist < p.radius + 14) {
         const val = s.value;
+        const kind = s.kind;
         this.releaseSparkAt(i);
         this.combo = Math.min(8, this.combo + 1);
         this.maxCombo = Math.max(this.maxCombo, this.combo);
         this.comboTimer = this.comboDuration;
-        this.addScore(val);
-        this.audio.playSparkPickup(this.combo);
 
-        if (p.overdriveTimer <= 0) {
-          p.overdriveCharge = Math.min(100, p.overdriveCharge + 7.5);
-          if (p.overdriveCharge >= 100) {
-            this.activateOverdrive();
+        if (kind === 'repair') {
+          this.triggerHullRepair(val);
+        } else {
+          this.addScore(val);
+          this.audio.playSparkPickup(this.combo);
+
+          if (p.overdriveTimer <= 0) {
+            p.overdriveCharge = Math.min(100, p.overdriveCharge + 7.5);
+            if (p.overdriveCharge >= 100) {
+              this.activateOverdrive();
+            }
           }
         }
       }
     }
+  }
+
+  private triggerHullRepair(bonusValue: number): void {
+    const p = this.player;
+    const healed = p.hp < p.maxHp;
+    if (healed) {
+      p.hp = Math.min(p.maxHp, p.hp + 1);
+      this.repairAnimTimer = this.repairAnimDuration;
+      this.addScore(bonusValue);
+      this.spawnFloatingText(p.x, p.y - 24, -42, '+1 CASCO', '#7AE4FF', 1.15);
+      this.spawnShockwave(p.x, p.y, 148, '#5CE1FF', 2.4, 0.56, true);
+      this.spawnBurst(p.x, p.y, 16, '#7AE4FF', 210, 2.5);
+    } else {
+      this.repairAnimTimer = 0.65;
+      this.addScore(150);
+      this.spawnFloatingText(p.x, p.y - 24, -42, '+150 ESCUDO', '#7AE4FF', 0.95);
+      this.spawnShockwave(p.x, p.y, 112, '#5CE1FF', 2.0, 0.42, false);
+    }
+    this.repairPulseId += 1;
+    this.repairMoteAccum = 0;
+    this.audio.playHullPressurize(p.hp >= p.maxHp);
+    this.vibrate([12, 22, 14]);
+    this.emitHud();
   }
 
   private activateOverdrive(): void {
@@ -2214,6 +2691,8 @@ export class SolarisEngine {
       newRecord: this.newRecord,
       damageFlashRatio: Math.max(0, Math.min(1, this.damageFlashTimer / this.damageFlashDuration)),
       damagePulseId: this.damagePulseId,
+      repairAnimRatio: Math.max(0, Math.min(1, this.repairAnimTimer / this.repairAnimDuration)),
+      repairPulseId: this.repairPulseId,
     });
   }
 
@@ -2269,6 +2748,12 @@ export class SolarisEngine {
       return;
     }
 
+    if (this.state === 'INTRO_CUTSCENE') {
+      this.renderIntroCutscene(ctx, w, h);
+      ctx.restore();
+      return;
+    }
+
     this.renderBackdrop(ctx, w, h);
 
     this.renderSparks(ctx);
@@ -2311,7 +2796,164 @@ export class SolarisEngine {
   private renderBackdrop(ctx: CanvasRenderingContext2D, w: number, h: number): void {
     const offsetX = (this.player.x - w * 0.5) * 0.04;
     const offsetY = (this.player.y - h * 0.5) * 0.04;
+    const minDim = Math.min(w, h);
+    const maxDim = Math.max(w, h);
 
+    // 1. Randomized Cosmic Nebula (unique position, scale & palette per match)
+    const neb = this.combatNebula;
+    const nebX = neb.normX * w - offsetX * 0.14;
+    const nebY = neb.normY * h - offsetY * 0.14;
+    const nebBaseR = maxDim * neb.scale;
+
+    ctx.save();
+    ctx.translate(nebX, nebY);
+    ctx.rotate(neb.rotation);
+    ctx.globalCompositeOperation = 'screen';
+
+    for (let i = 0; i < neb.lobes.length; i++) {
+      const lobe = neb.lobes[i];
+      const rgb =
+        lobe.colorIdx === 0 ? neb.coreRgb : lobe.colorIdx === 1 ? neb.midRgb : neb.accentRgb;
+      const lx = lobe.dx * nebBaseR;
+      const ly = lobe.dy * nebBaseR;
+      const lrX = lobe.rx * nebBaseR;
+      const lrY = lobe.ry * nebBaseR;
+      const pulse = 0.94 + 0.06 * Math.sin(this.ambientTime * 0.45 + i * 1.4);
+
+      ctx.save();
+      ctx.translate(lx, ly);
+      ctx.rotate(lobe.rot);
+      ctx.scale(1, lrY / lrX);
+      const nGrad = ctx.createRadialGradient(0, 0, lrX * 0.04, 0, 0, lrX * pulse);
+      nGrad.addColorStop(0, `rgba(${rgb}, ${(lobe.alpha * 1.15).toFixed(3)})`);
+      nGrad.addColorStop(0.42, `rgba(${rgb}, ${(lobe.alpha * 0.6).toFixed(3)})`);
+      nGrad.addColorStop(1, `rgba(${rgb}, 0)`);
+      ctx.fillStyle = nGrad;
+      ctx.beginPath();
+      ctx.arc(0, 0, lrX * pulse, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.restore();
+
+    // 2. Randomized Distant Planet (guaranteed separated from Nebula)
+    const pl = this.combatPlanet;
+    const plX = pl.normX * w - offsetX * 0.22;
+    const plY = pl.normY * h - offsetY * 0.22;
+    const plR = Math.max(24, minDim * pl.scale);
+    const lx = Math.cos(pl.lightAngle);
+    const ly = Math.sin(pl.lightAngle);
+
+    ctx.save();
+    ctx.translate(plX, plY);
+
+    // Subtle atmospheric outer halo
+    const atmoHalo = ctx.createRadialGradient(
+      lx * plR * 0.28,
+      ly * plR * 0.28,
+      plR * 0.85,
+      0,
+      0,
+      plR * 1.48
+    );
+    atmoHalo.addColorStop(0, `rgba(${pl.rimRgb}, 0.22)`);
+    atmoHalo.addColorStop(0.55, `rgba(${pl.rimRgb}, 0.07)`);
+    atmoHalo.addColorStop(1, `rgba(${pl.rimRgb}, 0)`);
+    ctx.fillStyle = atmoHalo;
+    ctx.beginPath();
+    ctx.arc(0, 0, plR * 1.48, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Back half of planetary rings (if ringed)
+    if (pl.hasRings) {
+      ctx.save();
+      ctx.rotate(pl.ringTilt);
+      ctx.strokeStyle = `rgba(${pl.rimRgb}, 0.28)`;
+      ctx.lineWidth = Math.max(2.2, plR * 0.14);
+      ctx.beginPath();
+      ctx.ellipse(0, 0, plR * 2.05, plR * 0.46, 0, Math.PI, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = `rgba(${pl.bandRgb}, 0.14)`;
+      ctx.lineWidth = Math.max(1.2, plR * 0.06);
+      ctx.beginPath();
+      ctx.ellipse(0, 0, plR * 1.72, plR * 0.38, 0, Math.PI, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Planet sphere clipped with directional lighting & subtle atmospheric bands
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(0, 0, plR, 0, Math.PI * 2);
+    ctx.clip();
+
+    const sphereGrad = ctx.createRadialGradient(
+      lx * plR * 0.45,
+      ly * plR * 0.45,
+      plR * 0.08,
+      -lx * plR * 0.25,
+      -ly * plR * 0.25,
+      plR * 1.38
+    );
+    sphereGrad.addColorStop(0, pl.litHex);
+    sphereGrad.addColorStop(0.46, pl.midHex);
+    sphereGrad.addColorStop(0.86, pl.darkHex);
+    sphereGrad.addColorStop(1, '#070B14');
+    ctx.fillStyle = sphereGrad;
+    ctx.fillRect(-plR - 2, -plR - 2, plR * 2 + 4, plR * 2 + 4);
+
+    // Subtle gas/cloud latitude bands tilted with ring/axis
+    ctx.save();
+    ctx.rotate(pl.ringTilt * 0.65);
+    ctx.fillStyle = `rgba(${pl.bandRgb}, 0.11)`;
+    ctx.fillRect(-plR * 1.1, -plR * 0.38, plR * 2.2, plR * 0.14);
+    ctx.fillStyle = `rgba(${pl.bandRgb}, 0.07)`;
+    ctx.fillRect(-plR * 1.1, plR * 0.1, plR * 2.2, plR * 0.18);
+    ctx.restore();
+
+    // Deep night-side crescent shadow overlay for crisp 3D depth
+    const nightGrad = ctx.createRadialGradient(
+      lx * plR * 0.55,
+      ly * plR * 0.55,
+      plR * 0.35,
+      0,
+      0,
+      plR * 1.05
+    );
+    nightGrad.addColorStop(0, 'rgba(7, 11, 20, 0)');
+    nightGrad.addColorStop(0.75, 'rgba(7, 11, 20, 0.38)');
+    nightGrad.addColorStop(1, 'rgba(7, 11, 20, 0.82)');
+    ctx.fillStyle = nightGrad;
+    ctx.fillRect(-plR - 2, -plR - 2, plR * 2 + 4, plR * 2 + 4);
+
+    // Sunlit atmospheric limb rim
+    ctx.strokeStyle = `rgba(${pl.rimRgb}, 0.45)`;
+    ctx.lineWidth = Math.max(1.2, plR * 0.04);
+    ctx.beginPath();
+    ctx.arc(0, 0, plR - 0.5, pl.lightAngle - 1.15, pl.lightAngle + 1.15);
+    ctx.stroke();
+    ctx.restore();
+
+    // Front half of planetary rings (drawn cleanly over planet equator)
+    if (pl.hasRings) {
+      ctx.save();
+      ctx.rotate(pl.ringTilt);
+      ctx.strokeStyle = `rgba(${pl.rimRgb}, 0.36)`;
+      ctx.lineWidth = Math.max(2.2, plR * 0.14);
+      ctx.beginPath();
+      ctx.ellipse(0, 0, plR * 2.05, plR * 0.46, 0, 0, Math.PI);
+      ctx.stroke();
+      ctx.strokeStyle = `rgba(${pl.bandRgb}, 0.18)`;
+      ctx.lineWidth = Math.max(1.2, plR * 0.06);
+      ctx.beginPath();
+      ctx.ellipse(0, 0, plR * 1.72, plR * 0.38, 0, 0, Math.PI);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.restore();
+
+    // 3. Starfield & Astrolabe Meridian Backdrop
     for (const star of this.stars) {
       const sx = ((star.x * w - offsetX * star.depth) % w + w) % w;
       const sy = ((star.y * h - offsetY * star.depth) % h + h) % h;
@@ -2324,8 +2966,6 @@ export class SolarisEngine {
 
     const cx = w * 0.5 - offsetX * 0.35;
     const cy = h * 0.5 - offsetY * 0.35;
-    const minDim = Math.min(w, h);
-    const maxDim = Math.max(w, h);
 
     ctx.save();
     ctx.translate(cx, cy);
@@ -2400,18 +3040,20 @@ export class SolarisEngine {
     const minDim = Math.min(w, h);
     const maxRadius = Math.hypot(w, h) * 1.15;
 
-    // Ship dimensions & anchored right-edge framing (kept unchanged)
+    // Ship dimensions & clean top-right framing (prevents bottom clipping, right overshoot, and exposed top cut seam)
     const frontPair = this.sprites.PLAYER_FRONT;
     const imgAspect = frontPair ? frontPair.normal.width / frontPair.normal.height : 4 / 3;
-    const shipH = Math.min(h * 0.94, w * 0.54);
+    const isNarrow = w < h * 1.15;
+    const shipH = isNarrow ? Math.min(h * 0.72, w * 0.62) : Math.min(h * 0.78, w * 0.45);
     const shipW = shipH * imgAspect;
-    const bobX = Math.sin(t * 1.5) * 5.5 + Math.cos(t * 3.7) * 1.6;
-    const bobY = Math.cos(t * 2.0) * 7 + Math.sin(t * 4.9) * 1.4;
-    const pitchMicro = Math.sin(t * 1.2) * 0.02 + Math.cos(t * 3.1) * 0.005;
-    const breathScale = 1 + Math.sin(t * 2.6) * 0.01;
+    const bobX = Math.sin(t * 1.5) * 3.5 + Math.cos(t * 3.7) * 1.0;
+    const bobY = Math.cos(t * 2.0) * 3.5 + Math.sin(t * 4.9) * 0.9;
+    const pitchMicro = Math.sin(t * 1.2) * 0.012 + Math.cos(t * 3.1) * 0.003;
+    const breathScale = 1 + Math.sin(t * 2.6) * 0.007;
 
-    const shipCenterX = w - shipW * 0.44 + bobX;
-    const shipCenterY = h * 0.52 + bobY;
+    const rightBleed = Math.max(10, shipW * 0.015);
+    const shipCenterX = w - shipW * 0.5 + rightBleed + bobX;
+    const shipCenterY = shipH * 0.488 + bobY;
 
     // Exact measured ship fuselage centerline vector from artwork (nose lower-left -> tail upper-right = -37.5 deg)
     // Coupled live to pitchMicro so warp lines stay 100% locked to the ship's current heading vector
@@ -2765,6 +3407,32 @@ export class SolarisEngine {
       ctx.stroke();
     }
 
+    if (!dying && this.repairAnimTimer > 0) {
+      const ratio = this.repairAnimTimer / this.repairAnimDuration;
+      const progress = 1 - ratio;
+      const envelope = Math.min(1, progress * 5) * Math.min(1, ratio * 2.4);
+      const auraR = 36 - progress * 8;
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const glow = ctx.createRadialGradient(0, 0, 4, 0, 0, auraR);
+      glow.addColorStop(0, `rgba(156, 242, 255, ${(0.34 * envelope).toFixed(3)})`);
+      glow.addColorStop(0.55, `rgba(56, 189, 248, ${(0.24 * envelope).toFixed(3)})`);
+      glow.addColorStop(1, 'rgba(56, 189, 248, 0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(0, 0, auraR, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Contracting astrolabe pressurization & nanite seal ring
+      ctx.strokeStyle = `rgba(122, 228, 255, ${(0.72 * envelope).toFixed(2)})`;
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.arc(0, 0, 34 - progress * 14, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, progress * 1.25));
+      ctx.stroke();
+      ctx.restore();
+    }
+
     ctx.rotate(p.angle);
     ctx.translate(-p.recoil * 3.5, 0);
     ctx.scale(p.scaleX, p.scaleY);
@@ -2774,6 +3442,33 @@ export class SolarisEngine {
     }
 
     this.drawShipHull(ctx, p.overdriveTimer > 0 || dying, dying ? 0.3 : p.dashTimer > 0 ? 1.4 : 1, dyingFlash);
+
+    // Progressive bluish scan-wave sweeping across the cockpit & hull during repair
+    if (!dying && this.repairAnimTimer > 0) {
+      const ratio = this.repairAnimTimer / this.repairAnimDuration;
+      const progress = 1 - ratio;
+      const envelope = Math.min(1, progress * 5) * Math.min(1, ratio * 2.4);
+      const scanX = -22 + progress * 46;
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const hullSweep = ctx.createLinearGradient(scanX - 10, 0, scanX + 10, 0);
+      hullSweep.addColorStop(0, 'rgba(56, 189, 248, 0)');
+      hullSweep.addColorStop(0.5, `rgba(156, 242, 255, ${(0.62 * envelope).toFixed(3)})`);
+      hullSweep.addColorStop(1, 'rgba(56, 189, 248, 0)');
+      ctx.fillStyle = hullSweep;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 23, 16, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = `rgba(122, 228, 255, ${(0.55 * envelope).toFixed(3)})`;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 24, 17, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     ctx.restore();
   }
 
@@ -3051,16 +3746,54 @@ export class SolarisEngine {
       const alpha = s.life < 1.5 ? Math.max(0.2, s.life / 1.5) : 1;
       ctx.save();
       ctx.translate(s.x, s.y);
-      ctx.rotate(this.ambientTime * 4);
       ctx.globalAlpha = alpha;
-      ctx.fillStyle = PALETTE.brass;
-      ctx.beginPath();
-      ctx.moveTo(0, -6);
-      ctx.lineTo(4.5, 0);
-      ctx.lineTo(0, 6);
-      ctx.lineTo(-4.5, 0);
-      ctx.closePath();
-      ctx.fill();
+
+      if (s.kind === 'repair') {
+        const pulse = 1 + Math.sin(this.ambientTime * 7 + s.x * 0.05) * 0.14;
+        const glow = ctx.createRadialGradient(0, 0, 2, 0, 0, 17 * pulse);
+        glow.addColorStop(0, 'rgba(156, 242, 255, 0.72)');
+        glow.addColorStop(0.55, 'rgba(56, 189, 248, 0.32)');
+        glow.addColorStop(1, 'rgba(56, 189, 248, 0)');
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(0, 0, 17 * pulse, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Outer rotating astrolabe cyan & brass ring
+        ctx.save();
+        ctx.rotate(this.ambientTime * 2.4);
+        ctx.strokeStyle = PALETTE.brass;
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(0, -10.5);
+        ctx.lineTo(10.5, 0);
+        ctx.lineTo(0, 10.5);
+        ctx.lineTo(-10.5, 0);
+        ctx.closePath();
+        ctx.fillStyle = '#0D263B';
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+
+        // Luminous cyan-blue repair cross core
+        ctx.fillStyle = '#7AE4FF';
+        ctx.fillRect(-5.2, -1.7, 10.4, 3.4);
+        ctx.fillRect(-1.7, -5.2, 3.4, 10.4);
+        ctx.fillStyle = '#E8FCFF';
+        ctx.fillRect(-3.6, -0.9, 7.2, 1.8);
+        ctx.fillRect(-0.9, -3.6, 1.8, 7.2);
+      } else {
+        ctx.rotate(this.ambientTime * 4);
+        ctx.fillStyle = PALETTE.brass;
+        ctx.beginPath();
+        ctx.moveTo(0, -6);
+        ctx.lineTo(4.5, 0);
+        ctx.lineTo(0, 6);
+        ctx.lineTo(-4.5, 0);
+        ctx.closePath();
+        ctx.fill();
+      }
+
       ctx.restore();
     }
   }
@@ -3340,5 +4073,1214 @@ export class SolarisEngine {
     if (this.aimTouch) {
       drawStick(this.aimTouch, 'rgba(232, 93, 74, 0.78)');
     }
+  }
+
+  private updateIntroCutscene(dt: number): void {
+    this.cutsceneTime += dt;
+    const t = this.cutsceneTime;
+    const w = this.width;
+    const h = this.height;
+
+    this.cutsceneFlash = Math.max(0, this.cutsceneFlash - dt * 2.0);
+
+    // Act 1: Orbit around left flank to rear + Hyper-warp launch (0.00s -> 3.35s)
+    if (t < 3.35) {
+      const warpSpeedMult = t < 1.75 ? 1.0 + (t / 1.75) * 0.65 : 3.85;
+      for (const ws of this.warpStreaks) {
+        ws.z -= ws.speed * warpSpeedMult * dt;
+        if (ws.z <= 0.02) {
+          ws.z = 0.95 + Math.random() * 0.08;
+          ws.angle = Math.random() * Math.PI * 2;
+        }
+      }
+
+      if (t >= 1.75 && !this.cutsceneFlags.launched) {
+        this.cutsceneFlags.launched = true;
+        this.cutsceneFlash = 0.72;
+        this.shakeIntensity = 13;
+      }
+      this.updateParticlesAndWaves(dt);
+      return;
+    }
+
+    // Act 2: Rift exit into combat zone + squadron approach + slow-motion explosions (3.35s -> 6.35s)
+    if (!this.cutsceneFlags.riftEntered) {
+      this.cutsceneFlags.riftEntered = true;
+      this.cutsceneFlash = 0.95;
+      this.shakeIntensity = 10.5;
+      this.audio.playCutsceneRiftExit();
+      for (let i = 0; i < PARTICLE_POOL_SIZE; i++) this.particles[i].active = false;
+      for (let i = 0; i < SHOCKWAVE_POOL_SIZE; i++) this.shockwaves[i].active = false;
+      const rx = w * 0.19;
+      const ry = h * 0.76;
+      this.spawnShockwave(rx, ry, Math.min(w, h) * 0.34, '#E888FF', 3.0, 0.65, true);
+      this.spawnShockwave(rx, ry, Math.min(w, h) * 0.22, PALETTE.brass, 2.2, 0.48, false);
+    }
+
+    // Smooth slow-motion envelope during squadron engagement (4.50s -> 5.95s)
+    if (t < 4.5) {
+      this.cutsceneTimeScale = 1;
+    } else if (t < 4.72) {
+      const u = (t - 4.5) / 0.22;
+      this.cutsceneTimeScale = 1 - 0.76 * (u * u * (3 - 2 * u));
+    } else if (t < 5.58) {
+      this.cutsceneTimeScale = 0.24;
+    } else if (t < 5.98) {
+      const u = (t - 5.58) / 0.4;
+      this.cutsceneTimeScale = 0.24 + 0.76 * (u * u * (3 - 2 * u));
+    } else {
+      this.cutsceneTimeScale = 1;
+    }
+
+    const effDt = dt * this.cutsceneTimeScale;
+
+    // Player arrival flight path from hyperspace rift toward center arena
+    if (t < 4.35) {
+      const u = Math.min(1, (t - 3.35) / 1.0);
+      const ease = 1 - Math.pow(1 - u, 3);
+      const p0x = w * 0.16;
+      const p0y = h * 0.79;
+      const p1x = w * 0.35;
+      const p1y = h * 0.62;
+      const p2x = w * 0.46;
+      const p2y = h * 0.54;
+      const inv = 1 - ease;
+      this.player.x = inv * inv * p0x + 2 * inv * ease * p1x + ease * ease * p2x;
+      this.player.y = inv * inv * p0y + 2 * inv * ease * p1y + ease * ease * p2y;
+      this.player.angle = -0.62 + ease * 0.22;
+
+      if (t < 4.18 && Math.random() < 0.85) {
+        const backA = this.player.angle + Math.PI + (Math.random() - 0.5) * 0.35;
+        const spd = 120 + Math.random() * 140;
+        this.spawnParticle(
+          this.player.x + Math.cos(this.player.angle + Math.PI) * 18,
+          this.player.y + Math.sin(this.player.angle + Math.PI) * 18,
+          Math.cos(backA) * spd,
+          Math.sin(backA) * spd,
+          2.6 + Math.random() * 2.4,
+          0.35 + Math.random() * 0.25,
+          Math.random() < 0.55 ? PALETTE.brass : '#E888FF',
+          0.92,
+          'spark'
+        );
+      }
+    } else if (t < 5.65) {
+      const u = (t - 4.35) / 1.3;
+      this.player.x = w * (0.46 + u * 0.02);
+      this.player.y = h * (0.54 - u * 0.02);
+      this.player.angle = -0.4 - Math.sin(u * Math.PI) * 0.1;
+    } else {
+      const u = Math.min(1, (t - 5.65) / 0.7);
+      const ease = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+      this.player.x = w * (0.48 + ease * 0.02);
+      this.player.y = h * (0.52 - ease * 0.02);
+      this.player.angle = -0.4 + ease * (-Math.PI / 2 + 0.4);
+    }
+
+    // Update enemy squadron formation
+    for (let i = 0; i < this.cutsceneSquadron.length; i++) {
+      const m = this.cutsceneSquadron[i];
+      if (!m.alive) continue;
+      if (t >= 3.72 && t < 5.25) {
+        const u = Math.min(1, (t - 3.72) / 1.15);
+        const ease = 1 - Math.pow(1 - u, 3);
+        m.enemy.x = m.startX + (m.hoverX - m.startX) * ease;
+        m.enemy.y = m.startY + (m.hoverY - m.startY) * ease;
+        m.enemy.angle = Math.atan2(this.player.y - m.enemy.y, this.player.x - m.enemy.x);
+      } else if (t >= 5.25 && i >= 2) {
+        const u = Math.min(1, (t - 5.25) / 0.75);
+        const ease = u * u * (3 - 2 * u);
+        m.enemy.x = m.hoverX + (m.exitX - m.hoverX) * ease;
+        m.enemy.y = m.hoverY + (m.exitY - m.hoverY) * ease;
+        m.enemy.angle = Math.atan2(m.exitY - m.hoverY, m.exitX - m.hoverX);
+        m.alpha = Math.max(0, 1 - ease);
+      }
+    }
+
+    // Fire two golden plasma bolts in slow motion at 4.60s and 4.78s
+    if (t >= 4.6 && !this.cutsceneFlags.shot1 && this.cutsceneSquadron[0]) {
+      this.cutsceneFlags.shot1 = true;
+      const target = this.cutsceneSquadron[0].enemy;
+      const ang = Math.atan2(target.y - this.player.y, target.x - this.player.x);
+      this.player.angle = ang;
+      this.player.recoil = 1;
+      const b = this.cutsceneBolts[0];
+      b.active = true;
+      b.x = this.player.x + Math.cos(ang) * 20;
+      b.y = this.player.y + Math.sin(ang) * 20;
+      b.tx = target.x;
+      b.ty = target.y;
+      const dist = Math.hypot(b.tx - b.x, b.ty - b.y);
+      const spd = dist / 0.27;
+      b.vx = Math.cos(ang) * spd;
+      b.vy = Math.sin(ang) * spd;
+      this.audio.playShoot(true);
+    }
+
+    if (t >= 4.78 && !this.cutsceneFlags.shot2 && this.cutsceneSquadron[1]) {
+      this.cutsceneFlags.shot2 = true;
+      const target = this.cutsceneSquadron[1].enemy;
+      const ang = Math.atan2(target.y - this.player.y, target.x - this.player.x);
+      this.player.angle = ang;
+      this.player.recoil = 1;
+      const b = this.cutsceneBolts[1];
+      b.active = true;
+      b.x = this.player.x + Math.cos(ang) * 20;
+      b.y = this.player.y + Math.sin(ang) * 20;
+      b.tx = target.x;
+      b.ty = target.y;
+      const dist = Math.hypot(b.tx - b.x, b.ty - b.y);
+      const spd = dist / 0.3;
+      b.vx = Math.cos(ang) * spd;
+      b.vy = Math.sin(ang) * spd;
+      this.audio.playShoot(true);
+    }
+
+    this.player.recoil = Math.max(0, this.player.recoil - dt * 5);
+
+    for (let i = 0; i < this.cutsceneBolts.length; i++) {
+      const b = this.cutsceneBolts[i];
+      if (!b.active) continue;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      const m = this.cutsceneSquadron[i];
+      if (m && m.alive) {
+        const d = Math.hypot(m.enemy.x - b.x, m.enemy.y - b.y);
+        if (d < 24 || (i === 0 && t >= 4.88) || (i === 1 && t >= 5.1)) {
+          b.active = false;
+          m.alive = false;
+          if (i === 0) this.cutsceneFlags.boom1 = true;
+          else this.cutsceneFlags.boom2 = true;
+          this.spawnAstrolabeExplosion(
+            m.enemy.x,
+            m.enemy.y,
+            PALETTE.coralBright,
+            PALETTE.brass,
+            'large'
+          );
+          this.audio.playSlowMoExplosion();
+          this.shakeIntensity = 9.5;
+          this.cutsceneFlash = Math.max(this.cutsceneFlash, 0.36);
+        }
+      }
+    }
+
+    this.updateParticlesAndWaves(effDt);
+
+    if (t >= this.cutsceneDuration) {
+      this.finishCutsceneToGameplay(false);
+    }
+  }
+
+  private renderIntroCutscene(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+    const t = this.cutsceneTime;
+    const minDim = Math.min(w, h);
+    const maxRadius = Math.hypot(w, h) * 1.15;
+
+    if (t < 3.35) {
+      // ACT 1: Orbit around LEFT flank to rear + Hyper-warp launch leaving camera behind
+      const frontPair = this.sprites.PLAYER_FRONT;
+      const imgAspect = frontPair ? frontPair.normal.width / frontPair.normal.height : 4 / 3;
+      const isNarrow = w < h * 1.15;
+      const shipH0 = isNarrow ? Math.min(h * 0.72, w * 0.62) : Math.min(h * 0.78, w * 0.45);
+      const shipW0 = shipH0 * imgAspect;
+      const rightBleed = Math.max(10, shipW0 * 0.015);
+      const cx0 = w - shipW0 * 0.5 + rightBleed;
+      const cy0 = shipH0 * 0.488;
+      const baseFuselageAngle = -0.655;
+      const axisCos0 = Math.cos(baseFuselageAngle);
+      const axisSin0 = Math.sin(baseFuselageAngle);
+      const nose0X = cx0 - 0.42 * shipW0;
+      const nose0Y = cy0 + 0.4 * shipH0;
+      const vpDist0 = Math.hypot(w, h) * 0.92;
+      const vp0X = nose0X - axisCos0 * vpDist0;
+      const vp0Y = nose0Y - axisSin0 * vpDist0;
+
+      const orbitRaw = Math.min(1, Math.max(0, t / 1.75));
+      const orbit =
+        orbitRaw < 0.5
+          ? 4 * orbitRaw * orbitRaw * orbitRaw
+          : 1 - Math.pow(-2 * orbitRaw + 2, 3) / 2;
+
+      const launchRaw = Math.min(1, Math.max(0, (t - 1.75) / 1.32));
+
+      // Camera zoom: subtle push-in during left-flank orbit without clipping wings on narrow screens
+      const camZoom =
+        t < 1.75
+          ? 1 + orbit * 0.12
+          : 1.12 - Math.min(1, (t - 1.75) / 0.75) * 0.12;
+
+      // Vanishing point sweeps from lower-left ahead of nose to dead-center ahead of ship
+      const targetVpX = w * 0.5;
+      const targetVpY = h * 0.47;
+      const vpX = vp0X + (targetVpX - vp0X) * orbit;
+      const vpY = vp0Y + (targetVpY - vp0Y) * orbit;
+      const vpDist = vpDist0 * (1 - orbit) + minDim * 0.06 * orbit;
+      const fullTunnelLen = vpDist + maxRadius * 1.15;
+
+      const hueCycle = (this.ambientTime) * 0.34;
+      const magentaPhase = 0.5 + 0.5 * Math.sin(hueCycle);
+      const crimsonPhase = 0.5 + 0.5 * Math.sin(hueCycle + 2.1);
+      const goldPhase = 0.5 + 0.5 * Math.sin(hueCycle + 4.2);
+
+      // Apply camera zoom centered on screen/target
+      ctx.save();
+      ctx.translate(w * 0.5, h * 0.5);
+      ctx.scale(camZoom, camZoom);
+      ctx.translate(-w * 0.5, -h * 0.5);
+
+      // 1. Cosmic warp base wash
+      const glowOriginX =
+        (nose0X - axisCos0 * (minDim * 0.35)) * (1 - orbit) + targetVpX * orbit;
+      const glowOriginY =
+        (nose0Y - axisSin0 * (minDim * 0.35)) * (1 - orbit) + targetVpY * orbit;
+      const baseGrad = ctx.createRadialGradient(
+        glowOriginX,
+        glowOriginY,
+        12,
+        glowOriginX,
+        glowOriginY,
+        maxRadius * 1.25
+      );
+      baseGrad.addColorStop(0, '#FFFDF7');
+      baseGrad.addColorStop(
+        0.11,
+        `rgba(${Math.round(230 + 25 * goldPhase)}, ${Math.round(145 + 65 * goldPhase)}, ${Math.round(220 - 60 * crimsonPhase)}, 0.88)`
+      );
+      baseGrad.addColorStop(
+        0.34,
+        `rgba(${Math.round(138 + 68 * crimsonPhase)}, ${Math.round(38 + 42 * goldPhase)}, ${Math.round(145 + 65 * magentaPhase)}, 0.74)`
+      );
+      baseGrad.addColorStop(
+        0.68,
+        `rgba(${Math.round(36 + 52 * crimsonPhase)}, ${Math.round(20 + 24 * magentaPhase)}, ${Math.round(68 + 42 * magentaPhase)}, 0.92)`
+      );
+      baseGrad.addColorStop(1, '#090D1A');
+      ctx.fillStyle = baseGrad;
+      ctx.fillRect(-w * 0.25, -h * 0.25, w * 1.5, h * 1.5);
+
+      // 2. Volumetric nebula light curtains expanding from side-cone into full 360° cylindrical tunnel
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.translate(vpX, vpY);
+      const beamCount = 28;
+      const coneSpan = 0.32 + (Math.PI - 0.32) * orbit;
+      for (let i = 0; i < beamCount; i++) {
+        const normalized = coneSpan >= Math.PI * 0.95 ? (i / beamCount) * 2 - 1 : (i / (beamCount - 1)) * 2 - 1;
+        const sway = Math.sin(this.ambientTime * (0.65 + (i % 5) * 0.1) + i * 1.7) * 0.022;
+        const angle = baseFuselageAngle * (1 - orbit) + normalized * coneSpan + sway;
+        const halfSpread = 0.024 + (i % 4) * 0.012;
+        const beamLen = fullTunnelLen * (0.9 + 0.14 * Math.sin(this.ambientTime + i * 2.1));
+
+        const paletteIdx = (i + Math.floor(this.ambientTime * 0.25)) % 5;
+        let rgb = '216, 110, 245';
+        if (paletteIdx === 1) rgb = '240, 82, 118';
+        else if (paletteIdx === 2) rgb = '246, 198, 96';
+        else if (paletteIdx === 3) rgb = '104, 214, 220';
+        else if (paletteIdx === 4) rgb = '244, 232, 255';
+
+        const peakAlpha = (0.11 + (i % 3) * 0.04) * (1 + launchRaw * 0.35);
+        const gx = Math.cos(angle) * beamLen;
+        const gy = Math.sin(angle) * beamLen;
+        const beamGrad = ctx.createLinearGradient(0, 0, gx, gy);
+        beamGrad.addColorStop(0, `rgba(255, 252, 245, ${Math.min(0.45, peakAlpha * 1.3).toFixed(3)})`);
+        beamGrad.addColorStop(0.45, `rgba(${rgb}, ${Math.min(0.4, peakAlpha).toFixed(3)})`);
+        beamGrad.addColorStop(1, `rgba(${rgb}, 0)`);
+        ctx.fillStyle = beamGrad;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(angle - halfSpread) * beamLen, Math.sin(angle - halfSpread) * beamLen);
+        ctx.lineTo(Math.cos(angle + halfSpread) * beamLen, Math.sin(angle + halfSpread) * beamLen);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // 3. Expanding volumetric nebula rings sweeping past camera
+      const cloudWaves = 6;
+      for (let i = 0; i < cloudWaves; i++) {
+        const speed = t < 1.75 ? 0.48 : 1.05;
+        const progress = (t * speed + i / cloudWaves) % 1;
+        const rOuter = vpDist * 0.4 + Math.pow(progress, 1.3) * fullTunnelLen * 0.92;
+        const rInner = rOuter * 0.72;
+        const alpha = Math.min(1, progress * 3.5) * Math.min(1, (1 - progress) * 2.2) * 0.24;
+        if (alpha <= 0.006) continue;
+        const waveRgb =
+          i % 3 === 0 ? '210, 96, 245' : i % 3 === 1 ? '245, 185, 92' : '235, 78, 112';
+        const cloudGrad = ctx.createRadialGradient(0, 0, rInner, 0, 0, rOuter);
+        cloudGrad.addColorStop(0, `rgba(${waveRgb}, 0)`);
+        cloudGrad.addColorStop(0.55, `rgba(${waveRgb}, ${alpha.toFixed(3)})`);
+        cloudGrad.addColorStop(1, `rgba(${waveRgb}, 0)`);
+        ctx.fillStyle = cloudGrad;
+        ctx.beginPath();
+        ctx.arc(0, 0, rOuter, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // 4. Warp core glow at tunnel mouth
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const coreR = minDim * (0.48 - orbit * 0.14 + launchRaw * 0.18);
+      const coreGrad = ctx.createRadialGradient(glowOriginX, glowOriginY, 0, glowOriginX, glowOriginY, coreR);
+      coreGrad.addColorStop(0, 'rgba(255, 255, 255, 0.96)');
+      coreGrad.addColorStop(0.24, 'rgba(255, 248, 232, 0.78)');
+      coreGrad.addColorStop(0.54, 'rgba(246, 178, 255, 0.36)');
+      coreGrad.addColorStop(1, 'rgba(232, 184, 75, 0)');
+      ctx.fillStyle = coreGrad;
+      ctx.beginPath();
+      ctx.arc(glowOriginX, glowOriginY, coreR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // 5. Radial hyperspace streaks sweeping from side fan into full 360 tunnel
+      const drawTunnelStreaks = (foregroundPass: boolean) => {
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.lineCap = 'round';
+        for (let i = 0; i < this.warpStreaks.length; i++) {
+          const ws = this.warpStreaks[i];
+          if (ws.foreground !== foregroundPass) continue;
+          const progress = 1 - ws.z;
+          const sideAngle = baseFuselageAngle + Math.sin(ws.angle * 3.7) * 0.34;
+          // Smoothly blend angle into full 360 tunnel rays as orbit finishes
+          const rayAngle = sideAngle * (1 - orbit) + ws.angle * orbit;
+          const cosA = Math.cos(rayAngle);
+          const sinA = Math.sin(rayAngle);
+
+          const rHead = vpDist * 0.34 + Math.pow(progress, 1.35) * fullTunnelLen * 0.94;
+          const streakLen =
+            (36 + ws.speed * (95 + launchRaw * 165)) * (0.25 + Math.pow(progress, 1.05) * 1.3);
+          const rTail = Math.max(0, rHead - streakLen);
+          const alpha =
+            Math.min(1, progress * 4.2) *
+            Math.min(1, (1 - progress) * 2.6) *
+            (foregroundPass ? 0.85 : 0.76);
+          if (alpha <= 0.012) continue;
+
+          ctx.globalAlpha = alpha;
+          ctx.strokeStyle = ws.color;
+          ctx.lineWidth = ws.thickness * (0.45 + progress * (1.15 + launchRaw * 0.9));
+          ctx.beginPath();
+          ctx.moveTo(vpX + cosA * rTail, vpY + sinA * rTail);
+          ctx.lineTo(vpX + cosA * rHead, vpY + sinA * rHead);
+          ctx.stroke();
+        }
+        ctx.restore();
+      };
+
+      drawTunnelStreaks(false);
+
+      // 6. Ship Orbit & Hyper-Warp Departure
+      const shipStartX = w * 0.55;
+      const shipStartY = h * 0.49;
+      const shipTargetX = w * 0.5;
+      const shipTargetY = h * 0.54;
+      const orbitShipX = shipStartX + (shipTargetX - shipStartX) * orbit;
+      const orbitShipY = shipStartY + (shipTargetY - shipStartY) * orbit;
+
+      // Phase A: Keep title closeup strictly anchored to top-right while fading out over 0.18s so its cropped JPG borders never drag into mid-screen
+      if (frontPair && t < 0.18) {
+        const frontFade = Math.max(0, 1 - t / 0.18);
+        if (frontFade > 0.01) {
+          ctx.save();
+          ctx.globalAlpha = frontFade;
+          ctx.drawImage(frontPair.normal, cx0 - shipW0 / 2, cy0 - shipH0 / 2, shipW0, shipH0);
+          ctx.restore();
+        }
+      }
+
+      // Phase B: Full uncropped 3D-projected Solaris Chase Ship orbiting around left flank to dead-on rear, then blasting into deep tunnel
+      const ship3DFade = t < 0.05 ? 0 : Math.min(1, (t - 0.05) / 0.22);
+      if (ship3DFade > 0.01 && launchRaw < 0.98) {
+        // Yaw sweeps from left-front 3/4 (-1.05 rad, matching PLAYER_FRONT) -> left broadside (-1.57) -> dead-on rear (-Math.PI)
+        const yaw = -1.05 + (-Math.PI + 1.05) * Math.min(1, orbit * 1.03);
+        const bankRoll = Math.sin(orbit * Math.PI) * 0.16 * (1 - launchRaw);
+        const pitchRad = 0.42 * (1 - orbit) + 0.18 * orbit * (1 - launchRaw * 0.72);
+
+        // After 1.75s, camera stays behind while ship blasts down tunnel (depthZ = 1 -> 46)
+        const depthZ = t < 1.75 ? 1 : 1 + Math.pow(launchRaw, 2.35) * 45;
+        const projU = t < 1.75 ? 0 : 1 - 1 / depthZ;
+        const shipDrawX = orbitShipX + (vpX - orbitShipX) * projU;
+        const shipDrawY = orbitShipY + (vpY - orbitShipY) * projU;
+        const baseScale = isNarrow ? minDim * 0.175 : Math.min(w * 0.145, h * 0.195);
+        const shipScale = baseScale / depthZ;
+        const engineHeat = t < 1.75 ? 0.65 + orbit * 0.85 : 2.6 - launchRaw * 0.8;
+        const disappearAlpha = launchRaw > 0.72 ? Math.max(0, 1 - (launchRaw - 0.72) / 0.24) : 1;
+
+        // Twin ionized warp contrails stretching behind the departing ship toward camera
+        if (t >= 1.75 && disappearAlpha > 0.02) {
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          const trailStart = Math.max(0, projU - 0.42);
+          const tx0 = orbitShipX + (vpX - orbitShipX) * trailStart;
+          const ty0 = orbitShipY + (vpY - orbitShipY) * trailStart;
+          const wingHalf = shipScale * 1.15;
+          const trailAlpha = (1 - launchRaw * 0.65) * 0.72;
+          for (const side of [-1, 1]) {
+            const x1 = tx0 + side * minDim * 0.14 * (1 - trailStart);
+            const y1 = ty0 + minDim * 0.015;
+            const x2 = shipDrawX + side * wingHalf;
+            const y2 = shipDrawY + shipScale * 0.08;
+            const tGrad = ctx.createLinearGradient(x1, y1, x2, y2);
+            tGrad.addColorStop(0, 'rgba(232, 136, 255, 0)');
+            tGrad.addColorStop(0.55, `rgba(246, 211, 121, ${(trailAlpha * 0.65).toFixed(2)})`);
+            tGrad.addColorStop(1, `rgba(255, 255, 255, ${trailAlpha.toFixed(2)})`);
+            ctx.strokeStyle = tGrad;
+            ctx.lineWidth = Math.max(1.2, 4.5 * (1 - launchRaw * 0.8));
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+          }
+
+          // Distant pinpoint star-flash right as the ship vanishes out of camera sight
+          if (launchRaw > 0.55) {
+            const glintAlpha = Math.sin(((launchRaw - 0.55) / 0.45) * Math.PI) * 0.95;
+            const glintR = minDim * (0.06 + (1 - launchRaw) * 0.06);
+            const gGrad = ctx.createRadialGradient(shipDrawX, shipDrawY, 0, shipDrawX, shipDrawY, glintR);
+            gGrad.addColorStop(0, `rgba(255, 255, 255, ${glintAlpha.toFixed(2)})`);
+            gGrad.addColorStop(0.35, `rgba(246, 211, 121, ${(glintAlpha * 0.6).toFixed(2)})`);
+            gGrad.addColorStop(1, 'rgba(232, 136, 255, 0)');
+            ctx.fillStyle = gGrad;
+            ctx.beginPath();
+            ctx.arc(shipDrawX, shipDrawY, glintR, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.restore();
+        }
+
+        if (disappearAlpha > 0.01 && shipScale > 1.2) {
+          ctx.save();
+          ctx.globalAlpha = ship3DFade * disappearAlpha;
+          this.renderCutsceneSolaris3D(
+            ctx,
+            shipDrawX,
+            shipDrawY,
+            shipScale,
+            yaw,
+            pitchRad,
+            bankRoll,
+            engineHeat
+          );
+          ctx.restore();
+        }
+      }
+
+      // Expanding warp ignition shockwave ring toward camera at t = 1.75s
+      if (t >= 1.75 && t < 2.65) {
+        const u = (t - 1.75) / 0.9;
+        const ringR = minDim * (0.06 + Math.pow(u, 0.72) * 0.95);
+        const alpha = (1 - u) * 0.72;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.strokeStyle = `rgba(246, 211, 121, ${alpha.toFixed(2)})`;
+        ctx.lineWidth = 4.5 * (1 - u * 0.65);
+        ctx.beginPath();
+        ctx.arc(shipTargetX, shipTargetY, ringR, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = `rgba(232, 136, 255, ${(alpha * 0.85).toFixed(2)})`;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(shipTargetX, shipTargetY, ringR * 0.84, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      drawTunnelStreaks(true);
+      ctx.restore(); // end camZoom
+
+      // Subtle golden warp pulse during 0 -> 0.26s crossfade from title close-up
+      const introPulse = t < 0.26 ? Math.sin((t / 0.26) * Math.PI) * 0.32 : 0;
+      // Peak transition flash into Act 2 (3.14s -> 3.35s)
+      const endFlash = t > 3.12 ? Math.pow((t - 3.12) / 0.23, 2) * 0.96 : 0;
+      const totalFlash = Math.min(1, Math.max(this.cutsceneFlash, endFlash, introPulse));
+      if (totalFlash > 0.01) {
+        ctx.fillStyle = `rgba(255, 248, 232, ${totalFlash.toFixed(3)})`;
+        ctx.fillRect(0, 0, w, h);
+      }
+      this.renderLetterbox(ctx, w, h, t);
+      return;
+    }
+
+    // ACT 2: Combat zone arrival, enemy squadron approach & slow-motion explosions (3.35s -> 6.35s)
+    let camZoom = 1;
+    let camFocusX = w * 0.5;
+    let camFocusY = h * 0.5;
+    if (t < 4.35) {
+      const u = (t - 3.35) / 1.0;
+      const ease = 1 - Math.pow(1 - u, 2);
+      camZoom = 1.2 - ease * 0.12;
+      camFocusX = w * (0.36 + ease * 0.16);
+      camFocusY = h * (0.62 - ease * 0.12);
+    } else if (t < 5.65) {
+      const u = Math.min(1, (t - 4.35) / 0.75);
+      const ease = u * u * (3 - 2 * u);
+      camZoom = 1.08 + ease * 0.16;
+      camFocusX = w * (0.52 + ease * 0.07);
+      camFocusY = h * (0.5 - ease * 0.06);
+    } else {
+      const u = Math.min(1, (t - 5.65) / 0.7);
+      const ease = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+      camZoom = 1.24 - ease * 0.24;
+      camFocusX = w * (0.59 - ease * 0.09);
+      camFocusY = h * (0.44 + ease * 0.06);
+    }
+
+    ctx.save();
+    ctx.translate(w * 0.5, h * 0.5);
+    ctx.scale(camZoom, camZoom);
+    ctx.translate(-camFocusX, -camFocusY);
+
+    this.renderBackdrop(ctx, w, h);
+
+    // Dimensional warp-exit rift behind incoming player ship (3.35s -> 4.35s)
+    if (t < 4.45) {
+      const riftLife = Math.max(0, 1 - (t - 3.35) / 1.1);
+      const rx = w * 0.18;
+      const ry = h * 0.76;
+      const riftR = minDim * (0.14 + Math.sin((1 - riftLife) * Math.PI) * 0.08) * riftLife;
+      if (riftR > 2) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        const rGrad = ctx.createRadialGradient(rx, ry, 0, rx, ry, riftR * 2.2);
+        rGrad.addColorStop(0, `rgba(255, 252, 245, ${(riftLife * 0.9).toFixed(2)})`);
+        rGrad.addColorStop(0.35, `rgba(232, 136, 255, ${(riftLife * 0.65).toFixed(2)})`);
+        rGrad.addColorStop(0.7, `rgba(232, 184, 75, ${(riftLife * 0.35).toFixed(2)})`);
+        rGrad.addColorStop(1, 'rgba(11, 19, 32, 0)');
+        ctx.fillStyle = rGrad;
+        ctx.beginPath();
+        ctx.arc(rx, ry, riftR * 2.2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = `rgba(246, 211, 121, ${(riftLife * 0.8).toFixed(2)})`;
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.ellipse(rx, ry, riftR * 0.65, riftR * 1.15, -0.55, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // Render incoming Sentinel Squadron
+    for (const m of this.cutsceneSquadron) {
+      if (!m.alive || m.alpha <= 0.01) continue;
+      const e = m.enemy;
+      const spriteKey: keyof typeof SPRITE_URLS = e.type === 'MINI_SCOUT' ? 'SCOUT' : e.type;
+      const pair = this.sprites[spriteKey];
+      const drawSize =
+        e.type === 'BASTION' ? 68 : e.type === 'STRIKER' ? 54 : 46;
+
+      ctx.save();
+      ctx.globalAlpha = m.alpha;
+      ctx.translate(e.x, e.y);
+      this.renderEnemyThrusters(ctx, e, drawSize);
+      if (pair) {
+        ctx.rotate(e.angle + Math.PI / 2);
+        ctx.drawImage(pair.normal, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
+      }
+      ctx.restore();
+    }
+
+    // Render slow-motion golden plasma bolts
+    for (const b of this.cutsceneBolts) {
+      if (!b.active) continue;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const ang = Math.atan2(b.vy, b.vx);
+      ctx.translate(b.x, b.y);
+      ctx.rotate(ang);
+      const bGrad = ctx.createLinearGradient(-22, 0, 10, 0);
+      bGrad.addColorStop(0, 'rgba(232, 184, 75, 0)');
+      bGrad.addColorStop(0.6, '#E8B84B');
+      bGrad.addColorStop(1, '#FFFDF7');
+      ctx.fillStyle = bGrad;
+      ctx.beginPath();
+      ctx.ellipse(-4, 0, 16, 3.2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Render Player Solaris ship
+    ctx.save();
+    ctx.translate(this.player.x, this.player.y);
+    ctx.rotate(this.player.angle);
+    ctx.translate(-this.player.recoil * 4, 0);
+    const arrivalBoost = t < 4.2 ? 1.85 : 1.05;
+    this.drawShipHull(ctx, t < 4.1, arrivalBoost, false);
+    ctx.restore();
+
+    this.renderParticlesAndWaves(ctx);
+    ctx.restore();
+
+    // Subtle slow-motion desaturated edge vignette during slow-mo engagement
+    if (this.cutsceneTimeScale < 0.95) {
+      const slowIntensity = (1 - this.cutsceneTimeScale) / 0.76;
+      const vig = ctx.createRadialGradient(
+        w * 0.5,
+        h * 0.5,
+        minDim * 0.28,
+        w * 0.5,
+        h * 0.5,
+        Math.hypot(w, h) * 0.58
+      );
+      vig.addColorStop(0, 'rgba(11, 19, 32, 0)');
+      vig.addColorStop(1, `rgba(6, 10, 20, ${(slowIntensity * 0.45).toFixed(3)})`);
+      ctx.fillStyle = vig;
+      ctx.fillRect(0, 0, w, h);
+    }
+
+    if (this.cutsceneFlash > 0.01) {
+      ctx.fillStyle = `rgba(255, 248, 232, ${Math.min(0.95, this.cutsceneFlash).toFixed(3)})`;
+      ctx.fillRect(0, 0, w, h);
+    }
+
+    this.renderLetterbox(ctx, w, h, t);
+  }
+
+  private renderCutsceneSolaris3D(
+    ctx: CanvasRenderingContext2D,
+    cx: number,
+    cy: number,
+    scale: number,
+    yaw: number,
+    pitch: number,
+    bank: number,
+    engineHeat: number
+  ): void {
+    const cosY = Math.cos(yaw);
+    const sinY = Math.sin(yaw);
+    const cosP = Math.cos(pitch);
+    const sinP = Math.sin(pitch);
+    const cosB = Math.cos(bank);
+    const sinB = Math.sin(bank);
+    const focal = 6.4;
+
+    // 3D project ship-local (x = starboard, y = up, z = forward nose) -> screen
+    // yaw = 0 faces camera; yaw = -1.05 shows front-left 3/4 matching PLAYER_FRONT; yaw = -Math.PI shows dead-on rear
+    const proj = (lx: number, ly: number, lz: number): { x: number; y: number; z: number } => {
+      const bx = lx * cosB - ly * sinB;
+      const by = lx * sinB + ly * cosB;
+      const bz = lz;
+      const yx = -bx * cosY + bz * sinY;
+      const yz = bx * sinY + bz * cosY;
+      const yy = by;
+      const py = yy * cosP - yz * sinP;
+      const pz = yy * sinP + yz * cosP;
+      const denom = Math.max(1.25, focal - pz);
+      const f = focal / denom;
+      return {
+        x: cx + yx * scale * f,
+        y: cy - py * scale * f,
+        z: pz,
+      };
+    };
+
+    const drawPoly = (
+      pts: Array<{ x: number; y: number }>,
+      fill: string | CanvasGradient,
+      stroke?: string,
+      lineWidth = 1.15
+    ) => {
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+      if (stroke) {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = lineWidth;
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+      }
+    };
+
+    const drawThrusterFlame = (
+      nozzle: { x: number; y: number },
+      radius: number,
+      heat: number
+    ) => {
+      const flicker = 0.88 + 0.12 * Math.sin(this.ambientTime * 52 + nozzle.x);
+      const glowR = radius * (1.85 + heat * 1.4) * flicker;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const grad = ctx.createRadialGradient(nozzle.x, nozzle.y, 0, nozzle.x, nozzle.y, glowR);
+      grad.addColorStop(0, 'rgba(255, 255, 255, 0.98)');
+      grad.addColorStop(0.28, 'rgba(130, 238, 255, 0.86)');
+      grad.addColorStop(0.58, 'rgba(232, 184, 75, 0.56)');
+      grad.addColorStop(1, 'rgba(232, 136, 255, 0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(nozzle.x, nozzle.y, glowR, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#FFFDF7';
+      ctx.beginPath();
+      ctx.arc(nozzle.x, nozzle.y, Math.max(1.4, radius * 0.65), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    };
+
+    const drawPodRearNozzle = (side: -1 | 1) => {
+      const podNozzle = proj(side * 0.52, -0.02, -0.95);
+      const podR = Math.max(2, scale * 0.115);
+      ctx.save();
+      ctx.fillStyle = '#1E2534';
+      ctx.strokeStyle = '#DFB047';
+      ctx.lineWidth = Math.max(1, scale * 0.024);
+      ctx.beginPath();
+      ctx.ellipse(podNozzle.x, podNozzle.y, podR * 1.1, podR * 0.95, bank, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+      drawThrusterFlame(podNozzle, podR * 0.88, engineHeat * 0.82);
+    };
+
+    const drawMainRearNozzle = () => {
+      const rearTopL = proj(-0.24, 0.17, -0.98);
+      const rearTopR = proj(0.24, 0.17, -0.98);
+      const rearMidL = proj(-0.3, -0.02, -0.99);
+      const rearMidR = proj(0.3, -0.02, -0.99);
+      const rearBotL = proj(-0.22, -0.17, -0.98);
+      const rearBotR = proj(0.22, -0.17, -0.98);
+      drawPoly(
+        [rearTopL, rearTopR, rearMidR, rearBotR, rearBotL, rearMidL],
+        '#202736',
+        '#DFB047',
+        Math.max(1.2, scale * 0.025)
+      );
+
+      // Brushed-gold inverted-U rear arch framing the central thruster
+      const archL = proj(-0.2, -0.14, -1.01);
+      const archTL = proj(-0.14, 0.15, -1.01);
+      const archTR = proj(0.14, 0.15, -1.01);
+      const archR = proj(0.2, -0.14, -1.01);
+      ctx.strokeStyle = '#F3D372';
+      ctx.lineWidth = Math.max(1.4, scale * 0.032);
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(archL.x, archL.y);
+      ctx.lineTo(archTL.x, archTL.y);
+      ctx.lineTo(archTR.x, archTR.y);
+      ctx.lineTo(archR.x, archR.y);
+      ctx.stroke();
+
+      const mainNozzle = proj(0, -0.02, -1.04);
+      const mainR = Math.max(3, scale * 0.185);
+      ctx.fillStyle = '#4A5264';
+      ctx.strokeStyle = '#DFB047';
+      ctx.lineWidth = Math.max(1.2, scale * 0.028);
+      ctx.beginPath();
+      ctx.ellipse(mainNozzle.x, mainNozzle.y, mainR * 1.12, mainR * 0.96, bank, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = '#141A24';
+      ctx.beginPath();
+      ctx.ellipse(mainNozzle.x, mainNozzle.y, mainR * 0.78, mainR * 0.66, bank, 0, Math.PI * 2);
+      ctx.fill();
+
+      drawThrusterFlame(mainNozzle, mainR * 1.12, engineHeat);
+    };
+
+    const drawWingAndPod = (side: -1 | 1) => {
+      const hullLight = side > 0 ? '#EAE3D6' : '#DDD5C7';
+      const hullMid = '#C8C0B2';
+      const hullDark = '#8A909D';
+      const goldMain = '#D6A53E';
+      const goldBright = '#F4D478';
+
+      const drawOuterWing = () => {
+        // Trapezoidal swept wing with thick brushed-gold leading & outer tip cap
+        const wRootF = proj(side * 0.64, 0.01, -0.2);
+        const wRootR = proj(side * 0.64, -0.01, -0.84);
+        const wTipR = proj(side * 1.38, -0.04, -0.82);
+        const wTipF = proj(side * 1.33, -0.02, -0.54);
+
+        const wBotRootF = proj(side * 0.64, -0.07, -0.22);
+        const wBotRootR = proj(side * 0.64, -0.08, -0.84);
+        const wBotTipR = proj(side * 1.38, -0.09, -0.82);
+        const wBotTipF = proj(side * 1.33, -0.08, -0.54);
+
+        // Wing edge thickness / underside bevel
+        drawPoly([wRootF, wTipF, wBotTipF, wBotRootF], hullDark, goldMain, 1.0);
+        drawPoly([wTipF, wTipR, wBotTipR, wBotTipF], goldMain, goldBright, 1.0);
+        drawPoly([wRootR, wTipR, wBotTipR, wBotRootR], hullDark, goldMain, 1.0);
+
+        // Cream upper wing panel
+        drawPoly([wRootF, wTipF, wTipR, wRootR], hullLight, '#B58B34', 1.15);
+
+        // Brushed-gold leading-edge & outer tip cap trim (matching PLAYER & PLAYER_FRONT)
+        const trimInF = proj(side * 0.66, 0.015, -0.24);
+        const trimTipF = proj(side * 1.24, -0.015, -0.53);
+        const trimTipR = proj(side * 1.28, -0.035, -0.80);
+        const trimOutR = proj(side * 1.38, -0.04, -0.82);
+        const trimOutF = proj(side * 1.33, -0.02, -0.54);
+        drawPoly([wRootF, trimOutF, trimOutR, trimTipR, trimTipF, trimInF], goldMain, goldBright, 0.9);
+      };
+
+      const drawNacellePod = () => {
+        // Inner bridge strut connecting fuselage to nacelle pod
+        const brInF = proj(side * 0.31, 0.06, -0.24);
+        const brOutF = proj(side * 0.41, 0.06, -0.24);
+        const brOutR = proj(side * 0.41, 0.04, -0.68);
+        const brInR = proj(side * 0.31, 0.04, -0.68);
+        drawPoly([brInF, brOutF, brOutR, brInR], hullMid, '#B58B34', 1.0);
+
+        // Chunky faceted nacelle pod housing (front at z=+0.22, rear at z=-0.92)
+        const pInTopF = proj(side * 0.39, 0.14, 0.20);
+        const pOutTopF = proj(side * 0.65, 0.10, 0.14);
+        const pOutBotF = proj(side * 0.65, -0.10, 0.14);
+        const pInBotF = proj(side * 0.39, -0.13, 0.20);
+
+        const pInTopR = proj(side * 0.39, 0.13, -0.91);
+        const pOutTopR = proj(side * 0.65, 0.09, -0.89);
+        const pOutBotR = proj(side * 0.65, -0.09, -0.89);
+        const pInBotR = proj(side * 0.39, -0.12, -0.91);
+
+        // Side outer pod flank
+        drawPoly([pOutTopF, pOutTopR, pOutBotR, pOutBotF], hullMid, '#B58B34', 1.1);
+        // Inner pod flank
+        drawPoly([pInTopF, pInTopR, pInBotR, pInBotF], hullDark, '#9A762B', 0.95);
+        // Cream upper pod deck
+        drawPoly([pInTopF, pOutTopF, pOutTopR, pInTopR], hullLight, '#C4963A', 1.15);
+
+        // Brushed-gold front intake bevel & rear trim collar on pod
+        const trimF1 = proj(side * 0.40, 0.145, 0.20);
+        const trimF2 = proj(side * 0.65, 0.105, 0.14);
+        const trimF3 = proj(side * 0.65, 0.10, 0.05);
+        const trimF4 = proj(side * 0.40, 0.14, 0.10);
+        drawPoly([trimF1, trimF2, trimF3, trimF4], goldMain, goldBright, 0.9);
+
+        // Forward circular recessed turbine intake (visible from front/side views)
+        if (cosY > -0.22) {
+          drawPoly([pInTopF, pOutTopF, pOutBotF, pInBotF], '#242B38', goldMain, 1.3);
+          const inCenter = proj(side * 0.52, 0.0, 0.17);
+          const inR = Math.max(2, scale * 0.095);
+          ctx.fillStyle = '#121720';
+          ctx.strokeStyle = '#6B7484';
+          ctx.lineWidth = Math.max(1, scale * 0.02);
+          ctx.beginPath();
+          ctx.ellipse(inCenter.x, inCenter.y, inR * 0.95, inR * 0.85, bank, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.fillStyle = '#D6A53E';
+          ctx.beginPath();
+          ctx.arc(inCenter.x, inCenter.y, Math.max(1.2, inR * 0.25), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      };
+
+      // Depth-sort outer wing vs nacelle pod relative to camera angle
+      const wingDepth = proj(side * 1.0, 0, -0.55).z;
+      const podDepth = proj(side * 0.52, 0, -0.35).z;
+      if (wingDepth < podDepth) {
+        drawOuterWing();
+        drawNacellePod();
+      } else {
+        drawNacellePod();
+        drawOuterWing();
+      }
+
+      if (cosY < 0.28) {
+        drawPodRearNozzle(side);
+      }
+    };
+
+    const drawFuselage = () => {
+      const hullSun = '#F0EAE0';
+      const hullMid = '#DFD7C8';
+      const hullFlank = '#C5BDB0';
+      const hullBelly = '#7B8290';
+      const goldMain = '#D6A53E';
+      const goldBright = '#F5D67B';
+      const crimsonMain = '#BC4A3C';
+
+      // Fuselage hull stations from ogive nose (+1.54) to rear bulkhead (-0.98)
+      const noseTip = proj(0, -0.02, 1.54);
+
+      const nCapL = proj(-0.13, 0.04, 1.32);
+      const nCapR = proj(0.13, 0.04, 1.32);
+      const nCapBL = proj(-0.12, -0.10, 1.30);
+      const nCapBR = proj(0.12, -0.10, 1.30);
+
+      const midL = proj(-0.24, 0.12, 0.90);
+      const midR = proj(0.24, 0.12, 0.90);
+      const midBL = proj(-0.23, -0.16, 0.88);
+      const midBR = proj(0.23, -0.16, 0.88);
+
+      const fwdL = proj(-0.31, 0.18, 0.46);
+      const fwdR = proj(0.31, 0.18, 0.46);
+      const fwdBL = proj(-0.30, -0.20, 0.45);
+      const fwdBR = proj(0.30, -0.20, 0.45);
+
+      const cMidL = proj(-0.35, 0.21, 0.02);
+      const cMidR = proj(0.35, 0.21, 0.02);
+      const cMidBL = proj(-0.34, -0.21, 0.02);
+      const cMidBR = proj(0.34, -0.21, 0.02);
+
+      const cRearL = proj(-0.35, 0.23, -0.34);
+      const cRearR = proj(0.35, 0.23, -0.34);
+      const cRearBL = proj(-0.33, -0.20, -0.34);
+      const cRearBR = proj(0.33, -0.20, -0.34);
+
+      const tailL = proj(-0.30, 0.19, -0.98);
+      const tailR = proj(0.30, 0.19, -0.98);
+      const tailBL = proj(-0.26, -0.17, -0.98);
+      const tailBR = proj(0.26, -0.17, -0.98);
+
+      // 1. Shaded underside belly plate
+      drawPoly(
+        [noseTip, nCapBL, midBL, fwdBL, cMidBL, cRearBL, tailBL, tailBR, cRearBR, cMidBR, fwdBR, midBR, nCapBR],
+        hullBelly,
+        '#9A762B',
+        0.95
+      );
+
+      // 2. Camera-facing lateral fuselage flank & gold shoulder rail
+      if (sinY <= 0) {
+        drawPoly(
+          [noseTip, nCapL, midL, fwdL, cMidL, cRearL, tailL, tailBL, cRearBL, cMidBL, fwdBL, midBL, nCapBL],
+          hullFlank,
+          '#B48B34',
+          1.05
+        );
+        // Brushed-gold lateral waist rail (matches title art!)
+        const rail1 = proj(-0.28, 0.10, 0.50);
+        const rail2 = proj(-0.35, 0.11, -0.36);
+        const rail3 = proj(-0.34, 0.03, -0.36);
+        const rail4 = proj(-0.28, 0.03, 0.50);
+        drawPoly([rail1, rail2, rail3, rail4], goldMain, goldBright, 0.85);
+      } else {
+        drawPoly(
+          [noseTip, nCapR, midR, fwdR, cMidR, cRearR, tailR, tailBR, cRearBR, cMidBR, fwdBR, midBR, nCapBR],
+          hullFlank,
+          '#B48B34',
+          1.05
+        );
+        const rail1 = proj(0.28, 0.10, 0.50);
+        const rail2 = proj(0.35, 0.11, -0.36);
+        const rail3 = proj(0.34, 0.03, -0.36);
+        const rail4 = proj(0.28, 0.03, 0.50);
+        drawPoly([rail1, rail2, rail3, rail4], goldMain, goldBright, 0.85);
+      }
+
+      // 3. Upper cream/ivory hull deck
+      drawPoly(
+        [noseTip, nCapL, midL, fwdL, cMidL, cRearL, tailL, tailR, cRearR, cMidR, fwdR, midR, nCapR],
+        hullSun,
+        '#D1A23D',
+        1.25
+      );
+
+      // Brushed-gold nose tip cap & curved nose collar
+      drawPoly([noseTip, nCapL, proj(0, 0.07, 1.34), nCapR], goldMain, goldBright, 1.0);
+      const collarL = proj(-0.16, 0.07, 1.24);
+      const collarC = proj(0, 0.11, 1.28);
+      const collarR = proj(0.16, 0.07, 1.24);
+      ctx.strokeStyle = goldMain;
+      ctx.lineWidth = Math.max(1.5, scale * 0.034);
+      ctx.beginPath();
+      ctx.moveTo(collarL.x, collarL.y);
+      ctx.quadraticCurveTo(collarC.x, collarC.y, collarR.x, collarR.y);
+      ctx.stroke();
+
+      // Forward twin rust-crimson racing stripes (separated by thin cream pinstripe)
+      const fSt1A = proj(-0.115, 0.105, 1.22);
+      const fSt1B = proj(-0.024, 0.115, 1.24);
+      const fSt1C = proj(-0.024, 0.19, 0.52);
+      const fSt1D = proj(-0.135, 0.185, 0.52);
+      drawPoly([fSt1A, fSt1B, fSt1C, fSt1D], crimsonMain);
+
+      const fSt2A = proj(0.024, 0.115, 1.24);
+      const fSt2B = proj(0.115, 0.105, 1.22);
+      const fSt2C = proj(0.135, 0.185, 0.52);
+      const fSt2D = proj(0.024, 0.19, 0.52);
+      drawPoly([fSt2A, fSt2B, fSt2C, fSt2D], crimsonMain);
+
+      // Iconic curved gold collar band right in front of canopy
+      const preCanL = proj(-0.30, 0.18, 0.48);
+      const preCanC = proj(0, 0.215, 0.54);
+      const preCanR = proj(0.30, 0.18, 0.48);
+      ctx.strokeStyle = goldMain;
+      ctx.lineWidth = Math.max(1.6, scale * 0.038);
+      ctx.beginPath();
+      ctx.moveTo(preCanL.x, preCanL.y);
+      ctx.quadraticCurveTo(preCanC.x, preCanC.y, preCanR.x, preCanR.y);
+      ctx.stroke();
+
+      const drawAmberCanopy = () => {
+        // Translucent warm amber-bronze bubble canopy matching title art
+        const baseF = proj(0, 0.21, 0.43);
+        const baseFL = proj(-0.18, 0.21, 0.28);
+        const baseL = proj(-0.22, 0.22, -0.02);
+        const baseRL = proj(-0.18, 0.23, -0.26);
+        const baseR0 = proj(0, 0.24, -0.30);
+        const baseRR = proj(0.18, 0.23, -0.26);
+        const baseR = proj(0.22, 0.22, -0.02);
+        const baseFR = proj(0.18, 0.21, 0.28);
+
+        const domeF = proj(0, 0.31, 0.25);
+        const domeApex = proj(0, 0.44, 0.02);
+        const domeB = proj(0, 0.37, -0.22);
+        const domeL = proj(-0.14, 0.36, -0.02);
+        const domeR = proj(0.14, 0.36, -0.02);
+
+        // Outer translucent amber glass envelope
+        const glassGrad = ctx.createLinearGradient(domeL.x, domeApex.y, domeR.x, baseF.y);
+        glassGrad.addColorStop(0, '#D48638');
+        glassGrad.addColorStop(0.45, '#8E4E1E');
+        glassGrad.addColorStop(1, '#3B1E0D');
+        drawPoly([baseF, baseFL, domeL, domeB, baseR0, domeR, baseFR], glassGrad);
+        drawPoly([baseF, baseFL, baseL, baseRL, baseR0, baseRR, baseR, baseFR], glassGrad);
+        drawPoly([baseFL, baseL, domeB, domeApex, domeF], '#A65E26');
+        drawPoly([baseF, domeF, domeApex, domeR, baseFR], '#733D18');
+        drawPoly([domeApex, domeB, baseRL, baseL], '#5B2E11');
+        drawPoly([domeApex, domeB, baseRR, baseR], '#4D260E');
+
+        // Subtle interior pilot headrest & console silhouette visible through amber glass
+        const seatTopL = proj(-0.07, 0.33, -0.10);
+        const seatTopR = proj(0.07, 0.33, -0.10);
+        const seatBotR = proj(0.09, 0.24, -0.12);
+        const seatBotL = proj(-0.09, 0.24, -0.12);
+        drawPoly([seatTopL, seatTopR, seatBotR, seatBotL], 'rgba(182, 102, 42, 0.65)', 'rgba(62, 30, 12, 0.5)', 0.9);
+
+        // Specular sunlight + hyperspace sheen on canopy dome
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        const sheenGrad = ctx.createRadialGradient(
+          domeF.x,
+          domeApex.y,
+          1,
+          domeApex.x,
+          domeApex.y,
+          Math.max(4, scale * 0.24)
+        );
+        sheenGrad.addColorStop(0, 'rgba(255, 245, 224, 0.72)');
+        sheenGrad.addColorStop(0.45, 'rgba(240, 172, 255, 0.34)');
+        sheenGrad.addColorStop(1, 'rgba(232, 184, 75, 0)');
+        ctx.fillStyle = sheenGrad;
+        ctx.beginPath();
+        ctx.ellipse(
+          (domeF.x + domeApex.x) * 0.5,
+          (domeF.y + domeApex.y) * 0.5,
+          Math.max(3, scale * 0.14),
+          Math.max(2, scale * 0.075),
+          -0.45,
+          0,
+          Math.PI * 2
+        );
+        ctx.fill();
+        ctx.restore();
+
+        // Rounded brushed-gold canopy bezel & rear roll-bar arch
+        ctx.strokeStyle = goldMain;
+        ctx.lineWidth = Math.max(1.6, scale * 0.042);
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(baseF.x, baseF.y);
+        ctx.lineTo(baseFL.x, baseFL.y);
+        ctx.lineTo(baseL.x, baseL.y);
+        ctx.lineTo(baseRL.x, baseRL.y);
+        ctx.lineTo(baseR0.x, baseR0.y);
+        ctx.lineTo(baseRR.x, baseRR.y);
+        ctx.lineTo(baseR.x, baseR.y);
+        ctx.lineTo(baseFR.x, baseFR.y);
+        ctx.closePath();
+        ctx.stroke();
+
+        // Canopy rear structural gold arch hoop
+        ctx.strokeStyle = goldBright;
+        ctx.lineWidth = Math.max(1.2, scale * 0.028);
+        ctx.beginPath();
+        ctx.moveTo(baseL.x, baseL.y);
+        ctx.quadraticCurveTo(domeB.x, domeB.y - scale * 0.04, baseR.x, baseR.y);
+        ctx.stroke();
+      };
+
+      const drawRearTurtleback = () => {
+        // Raised chamfered dorsal spine behind canopy (NO tall airplane tail fin)
+        const tbFL = proj(-0.24, 0.27, -0.34);
+        const tbFR = proj(0.24, 0.27, -0.34);
+        const tbRL = proj(-0.22, 0.21, -0.96);
+        const tbRR = proj(0.22, 0.21, -0.96);
+        const tbCollarC = proj(0, 0.30, -0.32);
+
+        // Side bevels of dorsal spine
+        drawPoly([cRearL, tbFL, tbRL, tailL], hullMid, '#B58B34', 1.0);
+        drawPoly([cRearR, tbFR, tbRR, tailR], hullMid, '#B58B34', 1.0);
+        // Top turtleback deck
+        drawPoly([tbFL, tbCollarC, tbFR, tbRR, tbRL], hullSun, goldMain, 1.2);
+
+        // Rear twin rust-crimson racing stripes
+        const rSt1A = proj(-0.11, 0.275, -0.38);
+        const rSt1B = proj(-0.024, 0.275, -0.38);
+        const rSt1C = proj(-0.024, 0.215, -0.95);
+        const rSt1D = proj(-0.105, 0.215, -0.95);
+        drawPoly([rSt1A, rSt1B, rSt1C, rSt1D], crimsonMain);
+
+        const rSt2A = proj(0.024, 0.275, -0.38);
+        const rSt2B = proj(0.11, 0.275, -0.38);
+        const rSt2C = proj(0.105, 0.215, -0.95);
+        const rSt2D = proj(0.024, 0.215, -0.95);
+        drawPoly([rSt2A, rSt2B, rSt2C, rSt2D], crimsonMain);
+
+        // Brushed-gold arch behind canopy collar
+        ctx.strokeStyle = goldMain;
+        ctx.lineWidth = Math.max(1.6, scale * 0.038);
+        ctx.beginPath();
+        ctx.moveTo(tbFL.x, tbFL.y);
+        ctx.quadraticCurveTo(tbCollarC.x, tbCollarC.y, tbFR.x, tbFR.y);
+        ctx.stroke();
+      };
+
+      // Proper 3D occlusion between amber canopy dome & raised rear turtleback
+      if (cosY < -0.35) {
+        drawAmberCanopy();
+        drawRearTurtleback();
+      } else {
+        drawRearTurtleback();
+        drawAmberCanopy();
+      }
+
+      if (cosY < 0.22) {
+        drawMainRearNozzle();
+      }
+    };
+
+    // Depth-order far wing/pod -> fuselage -> near wing/pod based on camera yaw side
+    if (sinY <= 0) {
+      drawWingAndPod(1);
+      drawFuselage();
+      drawWingAndPod(-1);
+    } else {
+      drawWingAndPod(-1);
+      drawFuselage();
+      drawWingAndPod(1);
+    }
+  }
+
+  private renderLetterbox(ctx: CanvasRenderingContext2D, w: number, h: number, t: number): void {
+    const inEase = 1 - Math.pow(1 - Math.min(1, t / 0.42), 3);
+    const outRaw = Math.min(1, Math.max(0, (t - (this.cutsceneDuration - 0.42)) / 0.42));
+    const outEase =
+      1 - (outRaw < 0.5 ? 4 * outRaw * outRaw * outRaw : 1 - Math.pow(-2 * outRaw + 2, 3) / 2);
+    const barH = Math.min(h * 0.11, 64) * inEase * outEase;
+    if (barH <= 0.5) return;
+
+    ctx.fillStyle = '#04070E';
+    ctx.fillRect(0, 0, w, barH);
+    ctx.fillRect(0, h - barH, w, barH);
+
+    ctx.strokeStyle = 'rgba(232, 184, 75, 0.28)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, barH);
+    ctx.lineTo(w, barH);
+    ctx.moveTo(0, h - barH);
+    ctx.lineTo(w, h - barH);
+    ctx.stroke();
   }
 }
