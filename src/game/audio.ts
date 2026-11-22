@@ -33,6 +33,7 @@ export class GameAudio {
   private settings: AudioSettings = { ...DEFAULT_AUDIO_SETTINGS };
   private saveSettingsTimer: number | null = null;
   private lastHoverTime = 0;
+  private lastUiClickTime = 0;
   private pauseHum: {
     osc1: OscillatorNode;
     osc2: OscillatorNode;
@@ -40,14 +41,22 @@ export class GameAudio {
     masterGain: GainNode;
   } | null = null;
 
-  private voiceBuffers: Partial<Record<'hullLow' | 'hullCritical' | 'welcome' | 'abandon', AudioBuffer>> = {};
+  private voiceBuffers: Partial<Record<'hullLow' | 'hullCritical', AudioBuffer>> = {};
   private voiceLoading = false;
+  private uiClickRawPromise: Promise<ArrayBuffer | null> | null = null;
+  private uiClickBuffer: AudioBuffer | null = null;
+  private uiClickDecodePromise: Promise<AudioBuffer | null> | null = null;
+  private uiClickFailed = false;
   private activeWarningSource: AudioBufferSourceNode | null = null;
-  private activeEventVoiceSource: AudioBufferSourceNode | null = null;
   private cutsceneMasterGain: GainNode | null = null;
   private cutsceneStopNodes: Array<{ stop: (when?: number) => void }> = [];
 
   constructor() {
+    if (typeof window !== 'undefined' && typeof fetch === 'function') {
+      this.uiClickRawPromise = fetch('/assets/audio/ui_click.mp3')
+        .then((res) => (res.ok ? res.arrayBuffer() : null))
+        .catch(() => null);
+    }
     try {
       this.muted = localStorage.getItem(MUTE_KEY) === 'true';
       const raw = localStorage.getItem(AUDIO_SETTINGS_KEY);
@@ -100,7 +109,6 @@ export class GameAudio {
     this.muted = nextMuted;
     if (this.muted) {
       this.stopWarningVoice();
-      this.stopEventVoice();
       this.stopPauseHum();
       this.stopCutsceneAudio();
     }
@@ -152,7 +160,10 @@ export class GameAudio {
       this.ctx.resume().catch(() => {});
     }
     if (!this.voiceLoading) {
-      this.preloadCyclopsVoices(this.ctx);
+      this.preloadHullVoices(this.ctx);
+    }
+    if (!this.uiClickDecodePromise) {
+      this.preloadUiClick(this.ctx);
     }
     return this.ctx;
   }
@@ -164,11 +175,11 @@ export class GameAudio {
     return this.ctx!.destination;
   }
 
-  private preloadCyclopsVoices(ctx: AudioContext): void {
+  private preloadHullVoices(ctx: AudioContext): void {
     this.voiceLoading = true;
-    const urls: Partial<Record<'hullLow' | 'hullCritical' | 'welcome' | 'abandon', string>> = {
-      hullLow: '/assets/audio/cyclops_hull_low.mp3',
-      hullCritical: '/assets/audio/cyclops_hull_critical.mp3',
+    const urls: Record<'hullLow' | 'hullCritical', string> = {
+      hullLow: '/assets/audio/hull_low.mp3',
+      hullCritical: '/assets/audio/hull_critical.mp3',
     };
 
     (Object.keys(urls) as Array<keyof typeof urls>).forEach((key) => {
@@ -184,6 +195,30 @@ export class GameAudio {
           // Ignore failed audio decode
         });
     });
+  }
+
+  private preloadUiClick(ctx: AudioContext): void {
+    const rawPromise =
+      this.uiClickRawPromise ??
+      fetch('/assets/audio/ui_click.mp3')
+        .then((res) => (res.ok ? res.arrayBuffer() : null))
+        .catch(() => null);
+
+    this.uiClickDecodePromise = rawPromise
+      .then((buf) => (buf ? ctx.decodeAudioData(buf.slice(0)) : null))
+      .then((decoded) => {
+        if (decoded) {
+          this.uiClickBuffer = decoded;
+          this.uiClickFailed = false;
+        } else {
+          this.uiClickFailed = true;
+        }
+        return decoded;
+      })
+      .catch(() => {
+        this.uiClickFailed = true;
+        return null;
+      });
   }
 
   public unlock(): void {
@@ -635,21 +670,13 @@ export class GameAudio {
     chime.stop(now + 0.5);
   }
 
-  private playVoiceClip(
-    key: 'hullLow' | 'hullCritical' | 'welcome' | 'abandon',
-    volume: number,
-    isWarningLoop: boolean
-  ): boolean {
+  private playVoiceClip(key: 'hullLow' | 'hullCritical', volume: number): boolean {
     const ctx = this.ensureContext();
     if (!ctx) return false;
     const buffer = this.voiceBuffers[key];
     if (!buffer) return false;
 
-    if (isWarningLoop) {
-      this.stopWarningVoice();
-    } else {
-      this.stopEventVoice();
-    }
+    this.stopWarningVoice();
 
     const source = ctx.createBufferSource();
     source.buffer = buffer;
@@ -660,51 +687,14 @@ export class GameAudio {
     source.connect(gain);
     gain.connect(this.getBus('voice'));
     source.onended = () => {
-      if (isWarningLoop && this.activeWarningSource === source) {
+      if (this.activeWarningSource === source) {
         this.activeWarningSource = null;
-      } else if (!isWarningLoop && this.activeEventVoiceSource === source) {
-        this.activeEventVoiceSource = null;
       }
     };
 
-    if (isWarningLoop) {
-      this.activeWarningSource = source;
-    } else {
-      this.activeEventVoiceSource = source;
-    }
-
+    this.activeWarningSource = source;
     source.start(ctx.currentTime);
     return true;
-  }
-
-  public playWelcomeVoice(): void {
-    if (this.muted) return;
-    const played = this.playVoiceClip('welcome', 0.85, false);
-    if (!played) {
-      // Retry shortly once audio buffer finishes decoding on first tap
-      window.setTimeout(() => {
-        if (!this.muted) {
-          this.playVoiceClip('welcome', 0.85, false);
-        }
-      }, 350);
-    }
-  }
-
-  public playAbandonShipVoice(): void {
-    if (this.muted) return;
-    this.stopWarningVoice();
-    this.playVoiceClip('abandon', 0.95, false);
-  }
-
-  private stopEventVoice(): void {
-    if (this.activeEventVoiceSource) {
-      try {
-        this.activeEventVoiceSource.stop();
-      } catch {
-        // Ignore already stopped source
-      }
-      this.activeEventVoiceSource = null;
-    }
   }
 
   public playWarningVoice(critical = false): void {
@@ -714,7 +704,7 @@ export class GameAudio {
     if (!ctx) return;
     const now = ctx.currentTime;
 
-    // 1. Subtle low Cyclops-style hull alert pulse before the voice line
+    // 1. Subtle low hull alert pulse before the voice line
     const notes = critical ? [138.59, 103.83] : [138.59];
     notes.forEach((freq, idx) => {
       const start = now + idx * 0.16;
@@ -738,14 +728,14 @@ export class GameAudio {
       osc.stop(start + 0.15);
     });
 
-    // 2. Play exact Cyclops deep male voice clip ("Caution. Hull integrity low." / "Warning. Hull integrity critical.")
+    // 2. Play the hull warning voice clip
     const clipKey = critical ? 'hullCritical' : 'hullLow';
-    const played = this.playVoiceClip(clipKey, 0.96, true);
+    const played = this.playVoiceClip(clipKey, 0.96);
     if (!played) {
       // If still decoding on very first trigger, retry briefly
       window.setTimeout(() => {
         if (!this.muted) {
-          this.playVoiceClip(clipKey, 0.96, true);
+          this.playVoiceClip(clipKey, 0.96);
         }
       }, 320);
     }
@@ -788,13 +778,14 @@ export class GameAudio {
     osc.stop(now + 0.032);
   }
 
-  public playUiClick(variant: 'primary' | 'secondary' | 'tab' = 'secondary'): void {
-    const ctx = this.ensureContext();
-    if (!ctx) return;
-
+  private playUiClickFallback(
+    ctx: AudioContext,
+    variant: 'primary' | 'secondary' | 'tab'
+  ): void {
+    if (this.muted || this.settings.master <= 0.001) return;
     const now = ctx.currentTime;
 
-    // 1. Crisp metallic brass click transient
+    // 1. Short metallic square click transient
     const clickOsc = ctx.createOscillator();
     const clickFilter = ctx.createBiquadFilter();
     const clickGain = ctx.createGain();
@@ -817,7 +808,7 @@ export class GameAudio {
     clickOsc.start(now);
     clickOsc.stop(now + 0.04);
 
-    // 2. Warm astrolabic resonant harmonic tail
+    // 2. Soft sine tail
     const baseHz = variant === 'primary' ? 440 : variant === 'tab' ? 587.33 : 493.88;
     const tailDur = variant === 'primary' ? 0.19 : 0.12;
     const freqs = variant === 'primary' ? [baseHz, baseHz * 1.498] : [baseHz];
@@ -836,6 +827,49 @@ export class GameAudio {
       hGain.connect(this.getBus('ui'));
       hum.start(now + idx * 0.02);
       hum.stop(now + tailDur + 0.015);
+    });
+  }
+
+  public playUiClick(variant: 'primary' | 'secondary' | 'tab' = 'secondary'): void {
+    const nowMs = performance.now();
+    if (nowMs - this.lastUiClickTime < 30) return;
+    this.lastUiClickTime = nowMs;
+
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    const triggerBuffer = (buffer: AudioBuffer) => {
+      if (this.muted || this.settings.master <= 0.001) return;
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+
+      const rate = variant === 'primary' ? 0.95 : variant === 'tab' ? 1.12 : 1.0;
+      source.playbackRate.setValueAtTime(rate, ctx.currentTime);
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(variant === 'primary' ? 0.9 : 0.78, ctx.currentTime);
+
+      source.connect(gain);
+      gain.connect(this.getBus('ui'));
+      source.start(ctx.currentTime);
+    };
+
+    if (this.uiClickBuffer) {
+      triggerBuffer(this.uiClickBuffer);
+      return;
+    }
+
+    if (this.uiClickFailed || !this.uiClickDecodePromise) {
+      this.playUiClickFallback(ctx, variant);
+      return;
+    }
+
+    this.uiClickDecodePromise.then((decoded) => {
+      if (decoded) {
+        triggerBuffer(decoded);
+      } else {
+        this.playUiClickFallback(ctx, variant);
+      }
     });
   }
 

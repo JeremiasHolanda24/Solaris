@@ -75,6 +75,7 @@ const INITIAL_HUD: HudSnapshot = {
   damagePulseId: 0,
   repairAnimRatio: 0,
   repairPulseId: 0,
+  hullHealProgress: 0,
 };
 
 function detectTouchDevice(): boolean {
@@ -211,6 +212,9 @@ export default function App() {
   }, []);
 
   const handleGameplaySettingsChange = useCallback((partial: Partial<GameplaySettings>) => {
+    if (partial.offscreenIndicators !== undefined || partial.cockpitDamageFx !== undefined) {
+      audioRef.current?.playUiClick('tab');
+    }
     setGameplaySettings((prev) => {
       const next = { ...prev, ...partial };
       engineRef.current?.setGameplaySettings(next);
@@ -650,7 +654,9 @@ export default function App() {
                       const repairActive = hud.repairAnimRatio > 0.01;
                       const repairProgress = Math.max(0, Math.min(1, 1 - hud.repairAnimRatio));
                       const isJustRepaired = repairActive && idx === hud.hp - 1;
+                      const isPartialCharging = !active && idx === hud.hp && hud.hullHealProgress > 0.01;
                       const clipTop = Math.round((1 - repairProgress) * 14);
+                      const partialClipTop = Math.round((1 - Math.max(0, Math.min(1, hud.hullHealProgress))) * 14);
                       return (
                         <svg
                           key={isJustRepaired ? `${idx}-repair-${hud.repairPulseId}` : idx}
@@ -667,23 +673,32 @@ export default function App() {
                               </clipPath>
                             </defs>
                           )}
+                          {isPartialCharging && (
+                            <defs>
+                              <clipPath id={`partial-fill-${idx}`}>
+                                <rect x="0" y={partialClipTop} width="16" height={16 - partialClipTop} />
+                              </clipPath>
+                            </defs>
+                          )}
                           <polygon
                             points="8,1 15,8 8,15 1,8"
                             fill={
                               isJustRepaired
                                 ? 'rgba(92, 225, 255, 0.24)'
-                                : active
-                                  ? flashing
-                                    ? '#FF7B66'
-                                    : repairActive
-                                      ? '#7AE4FF'
-                                      : '#E8B84B'
-                                  : 'transparent'
+                                : isPartialCharging
+                                  ? 'rgba(92, 225, 255, 0.14)'
+                                  : active
+                                    ? flashing
+                                      ? '#FF7B66'
+                                      : repairActive
+                                        ? '#7AE4FF'
+                                        : '#E8B84B'
+                                    : 'transparent'
                             }
                             stroke={
                               flashing
                                 ? '#FF7B66'
-                                : isJustRepaired || (repairActive && active)
+                                : isJustRepaired || isPartialCharging || (repairActive && active)
                                   ? '#7AE4FF'
                                   : active
                                     ? '#F4EFE6'
@@ -696,6 +711,13 @@ export default function App() {
                               points="8,1 15,8 8,15 1,8"
                               fill={repairProgress > 0.8 ? '#E8B84B' : '#5CE1FF'}
                               clipPath={`url(#repair-fill-${idx}-${hud.repairPulseId})`}
+                            />
+                          )}
+                          {isPartialCharging && (
+                            <polygon
+                              points="8,1 15,8 8,15 1,8"
+                              fill="#5CE1FF"
+                              clipPath={`url(#partial-fill-${idx})`}
                             />
                           )}
                         </svg>

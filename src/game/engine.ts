@@ -1,3 +1,4 @@
+import playerFrontSpriteUrl from '../assets/images/solaris_cockpit_closeup.png';
 import { GameAudio } from './audio';
 import {
   Bullet,
@@ -24,7 +25,7 @@ const BASTION_SPREAD = [-0.26, 0, 0.26] as const;
 
 const SPRITE_URLS = {
   PLAYER: '/src/assets/images/solaris_player_ship_1795180787643.jpg',
-  PLAYER_FRONT: '/src/assets/images/solaris_cockpit_closeup_1795192258826.jpg',
+  PLAYER_FRONT: playerFrontSpriteUrl,
   SCOUT: '/src/assets/images/solaris_enemy_scout_1795181299986.jpg',
   STRIKER: '/src/assets/images/solaris_enemy_striker_1795181300757.jpg',
   BASTION: '/src/assets/images/solaris_enemy_bastion_1795181300327.jpg',
@@ -102,6 +103,7 @@ export class SolarisEngine {
   private readonly repairAnimDuration = 1.4;
   private repairPulseId = 0;
   private repairMoteAccum = 0;
+  private hullHealProgress = 0;
   private ambientTime = 0;
 
   // Dramatic Player Destruction Sequence
@@ -315,8 +317,19 @@ export class SolarisEngine {
         clearance: number;
         diskTilt: number;
         accretionRgb: string;
+        secondaryRgb: string;
         hotRgb: string;
         spinDir: 1 | -1;
+        flareSide: 1 | -1;
+        debris: Array<{
+          angleOffset: number;
+          orbitMul: number;
+          speed: number;
+          sizeMul: number;
+          rotOffset: number;
+          rotSpeed: number;
+          pts: Array<{ a: number; r: number }>;
+        }>;
       }
   > = [];
 
@@ -499,7 +512,7 @@ export class SolarisEngine {
         const bgG = data[1];
         const bgB = data[2];
         const isLightBg = bgR > 200 && bgG > 200 && bgB > 200;
-        const threshold = key === 'PLAYER_FRONT' ? 12 : isLightBg ? 46 : 30;
+        const threshold = isLightBg ? 46 : 30;
 
         const totalPixels = outW * outH;
         const visited = new Uint8Array(totalPixels);
@@ -530,10 +543,6 @@ export class SolarisEngine {
         }
         for (let y = 0; y < outH; y++) {
           enqueue(0, y);
-          // For PLAYER_FRONT, avoid seeding inside the dark lower-right wing intake cavity on the right edge
-          if (key === 'PLAYER_FRONT' && y >= outH * 0.53 && y <= outH * 0.78) {
-            continue;
-          }
           enqueue(outW - 1, y);
         }
 
@@ -548,94 +557,11 @@ export class SolarisEngine {
           enqueue(x, y - 1);
         }
 
-        // For PLAYER_FRONT, peel & un-premultiply the dark exterior black-to-amber bloom
-        // along the sunlit outer rim (nose tip to wings) without entering interior dark intakes.
-        let haloProcessed: Uint8Array | null = null;
-        if (key === 'PLAYER_FRONT') {
-          haloProcessed = new Uint8Array(totalPixels);
-          const haloVisited = new Uint8Array(totalPixels);
-          const hQueue = new Int32Array(totalPixels);
-          let hHead = 0;
-          let hTail = 0;
-          const maxHaloX = Math.floor(outW * 0.62);
-
-          for (let y = 1; y < outH - 1; y++) {
-            for (let x = 1; x < maxHaloX; x++) {
-              const idx = y * outW + x;
-              if (visited[idx]) continue;
-              if (visited[idx - 1] || visited[idx + 1] || visited[idx - outW] || visited[idx + outW]) {
-                haloVisited[idx] = 1;
-                hQueue[hTail++] = idx;
-              }
-            }
-          }
-
-          while (hHead < hTail) {
-            const idx = hQueue[hHead++];
-            const o = idx * 4;
-            const r = data[o];
-            const g = data[o + 1];
-            const b = data[o + 2];
-            const maxC = r > g ? (r > b ? r : b) : g > b ? g : b;
-            const isDarkFringe = maxC < 24 && b < 14;
-            const isWarmBloom = r < 155 && b <= 21 && r >= g * 1.48 && r - b >= 8;
-            if (!isDarkFringe && !isWarmBloom) continue;
-
-            if (r <= 44) {
-              data[o + 3] = 0;
-              visited[idx] = 1;
-            } else {
-              const t = (r - 44) / (155 - 44);
-              const alphaF = t * t * 0.88;
-              data[o + 3] = Math.round(alphaF * 255);
-              if (alphaF > 0.02) {
-                const denom = Math.max(0.32, alphaF);
-                data[o] = Math.min(255, Math.round(r / denom));
-                data[o + 1] = Math.min(255, Math.round(g / denom));
-                data[o + 2] = Math.min(255, Math.round(b / denom));
-              }
-            }
-            haloProcessed[idx] = 1;
-
-            const x = idx % outW;
-            const y = (idx - x) / outW;
-            if (x + 1 < maxHaloX) {
-              const n = idx + 1;
-              if (!visited[n] && !haloVisited[n]) {
-                haloVisited[n] = 1;
-                hQueue[hTail++] = n;
-              }
-            }
-            if (x - 1 >= 0) {
-              const n = idx - 1;
-              if (!visited[n] && !haloVisited[n]) {
-                haloVisited[n] = 1;
-                hQueue[hTail++] = n;
-              }
-            }
-            if (y + 1 < outH) {
-              const n = idx + outW;
-              if (!visited[n] && !haloVisited[n]) {
-                haloVisited[n] = 1;
-                hQueue[hTail++] = n;
-              }
-            }
-            if (y - 1 >= 0) {
-              const n = idx - outW;
-              if (!visited[n] && !haloVisited[n]) {
-                haloVisited[n] = 1;
-                hQueue[hTail++] = n;
-              }
-            }
-          }
-        }
-
         // Soften 1px anti-alias fringe touching transparent exterior
         for (let y = 1; y < outH - 1; y++) {
           for (let x = 1; x < outW - 1; x++) {
             const idx = y * outW + x;
-            if (visited[idx] || (haloProcessed && haloProcessed[idx])) continue;
-            if (key === 'PLAYER_FRONT' && x >= outW * 0.72 && y >= outH * 0.5) continue;
+            if (visited[idx]) continue;
             const touchesBg =
               visited[idx - 1] || visited[idx + 1] || visited[idx - outW] || visited[idx + outW];
             if (touchesBg) {
@@ -724,6 +650,7 @@ export class SolarisEngine {
     this.damageFlashTimer = 0;
     this.repairAnimTimer = 0;
     this.repairMoteAccum = 0;
+    this.hullHealProgress = 0;
 
     this.playerDying = false;
     this.playerDetonated = false;
@@ -822,9 +749,9 @@ export class SolarisEngine {
       { coreHex: '#FEFCE8', coronaRgb: '244, 239, 230' },
     ];
     const blackHolePalettes = [
-      { accretionRgb: '245, 158, 11', hotRgb: '254, 243, 199' },
-      { accretionRgb: '192, 132, 252', hotRgb: '243, 232, 255' },
-      { accretionRgb: '56, 189, 248', hotRgb: '224, 242, 254' },
+      { accretionRgb: '59, 130, 246', secondaryRgb: '168, 85, 247', hotRgb: '235, 248, 255' },
+      { accretionRgb: '56, 189, 248', secondaryRgb: '129, 140, 248', hotRgb: '240, 249, 255' },
+      { accretionRgb: '245, 158, 11', secondaryRgb: '234, 88, 12', hotRgb: '255, 247, 224' },
     ];
 
     // Aspect-safe non-overlapping placement across standard & Wave 10+ expanded space
@@ -901,13 +828,45 @@ export class SolarisEngine {
     const bhCount = Math.random() < 0.45 ? 2 : 1;
     for (let i = 0; i < bhCount; i++) {
       const bhPal = blackHolePalettes[Math.floor(Math.random() * blackHolePalettes.length)];
-      const scale = 0.036 + Math.random() * 0.022;
-      const clearance = scale * 2.55;
+      const scale = 0.044 + Math.random() * 0.022;
+      const clearance = scale * 2.8;
       const pos =
         i === 0
-          ? pickDispersedPos(clearance, 0.08, 0.92, 0.1, 0.9, true)
-          : pickDispersedPos(clearance, -0.1, 1.1, -0.08, 1.08, true);
+          ? pickDispersedPos(clearance, 0.1, 0.9, 0.12, 0.88, true)
+          : pickDispersedPos(clearance, -0.08, 1.08, -0.06, 1.06, true);
       if (!pos) continue;
+
+      const debrisCount = 11 + Math.floor(Math.random() * 5);
+      const debris: Array<{
+        angleOffset: number;
+        orbitMul: number;
+        speed: number;
+        sizeMul: number;
+        rotOffset: number;
+        rotSpeed: number;
+        pts: Array<{ a: number; r: number }>;
+      }> = [];
+      for (let d = 0; d < debrisCount; d++) {
+        const verts = 6 + (d % 2);
+        const pts: Array<{ a: number; r: number }> = [];
+        for (let v = 0; v < verts; v++) {
+          pts.push({
+            a: (v / verts) * Math.PI * 2 + (Math.random() - 0.5) * 0.25,
+            r: 0.65 + Math.random() * 0.48,
+          });
+        }
+        const orbitMul = 1.48 + Math.random() * 1.18;
+        debris.push({
+          angleOffset: Math.random() * Math.PI * 2,
+          orbitMul,
+          speed: (0.28 + (2.7 - orbitMul) * 0.24) * (0.85 + Math.random() * 0.3),
+          sizeMul: 0.055 + Math.random() * 0.095,
+          rotOffset: Math.random() * Math.PI * 2,
+          rotSpeed: (Math.random() - 0.5) * 1.2,
+          pts,
+        });
+      }
+
       placed.push({ x: pos.x, y: pos.y, clearance });
       bodies.push({
         kind: 'black_hole',
@@ -915,10 +874,13 @@ export class SolarisEngine {
         normY: pos.y,
         scale,
         clearance,
-        diskTilt: (Math.random() - 0.5) * 0.95,
+        diskTilt: (Math.random() < 0.5 ? -1 : 1) * (0.18 + Math.random() * 0.36),
         accretionRgb: bhPal.accretionRgb,
+        secondaryRgb: bhPal.secondaryRgb,
         hotRgb: bhPal.hotRgb,
         spinDir: Math.random() < 0.5 ? 1 : -1,
+        flareSide: Math.random() < 0.5 ? 1 : -1,
+        debris,
       });
     }
 
@@ -1120,6 +1082,7 @@ export class SolarisEngine {
     this.state = 'TITLE_MENU';
     this.playerDying = false;
     this.playerDetonated = false;
+    this.hullHealProgress = 0;
     this.cutsceneSquadron = [];
     this.clearAllInputs();
     this.releaseAllEntities();
@@ -2806,6 +2769,18 @@ export class SolarisEngine {
             if (p.overdriveCharge >= 100) {
               this.activateOverdrive();
             }
+          } else if (p.hp < p.maxHp) {
+            this.hullHealProgress += 0.2;
+            if (this.hullHealProgress >= 1) {
+              this.hullHealProgress -= 1;
+              if (p.hp + 1 >= p.maxHp) {
+                this.hullHealProgress = 0;
+              }
+              this.triggerHullRepair(0);
+            } else {
+              this.spawnBurst(p.x, p.y, 4, '#7AE4FF', 110, 1.8);
+              this.emitHud();
+            }
           }
         }
       }
@@ -2817,12 +2792,18 @@ export class SolarisEngine {
     const healed = p.hp < p.maxHp;
     if (healed) {
       p.hp = Math.min(p.maxHp, p.hp + 1);
+      if (p.hp >= p.maxHp) {
+        this.hullHealProgress = 0;
+      }
       this.repairAnimTimer = this.repairAnimDuration;
-      this.addScore(bonusValue);
+      if (bonusValue > 0) {
+        this.addScore(bonusValue);
+      }
       this.spawnFloatingText(p.x, p.y - 24, -42, '+1 CASCO', '#7AE4FF', 1.15);
       this.spawnShockwave(p.x, p.y, 148, '#5CE1FF', 2.4, 0.56, true);
       this.spawnBurst(p.x, p.y, 16, '#7AE4FF', 210, 2.5);
     } else {
+      this.hullHealProgress = 0;
       this.repairAnimTimer = 0.65;
       this.addScore(150);
       this.spawnFloatingText(p.x, p.y - 24, -42, '+150 ESCUDO', '#7AE4FF', 0.95);
@@ -2938,6 +2919,7 @@ export class SolarisEngine {
       damagePulseId: this.damagePulseId,
       repairAnimRatio: Math.max(0, Math.min(1, this.repairAnimTimer / this.repairAnimDuration)),
       repairPulseId: this.repairPulseId,
+      hullHealProgress: p.hp < p.maxHp ? Math.max(0, Math.min(1, this.hullHealProgress)) : 0,
     });
   }
 
@@ -3151,78 +3133,288 @@ export class SolarisEngine {
       }
 
       if (body.kind === 'black_hole') {
-        const spin = this.ambientTime * 0.45 * body.spinDir;
+        const t = this.ambientTime;
+        const spin = t * 0.48 * body.spinDir;
+        const horizonR = br * 0.84;
+        const diskRx = br * 2.75;
+        const diskRy = br * 0.46;
+
+        const drawAsteroidChunk = (
+          ax: number,
+          ay: number,
+          rad: number,
+          rot: number,
+          pts: Array<{ a: number; r: number }>
+        ) => {
+          ctx.save();
+          ctx.translate(ax, ay);
+          ctx.rotate(rot);
+          ctx.beginPath();
+          for (let pIdx = 0; pIdx < pts.length; pIdx++) {
+            const px = Math.cos(pts[pIdx].a) * rad * pts[pIdx].r;
+            const py = Math.sin(pts[pIdx].a) * rad * pts[pIdx].r;
+            if (pIdx === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          ctx.closePath();
+
+          // Lit rim facing the photon core, dark rocky far side
+          const toCoreA = Math.atan2(-ay, -ax) - rot;
+          const gx = Math.cos(toCoreA) * rad;
+          const gy = Math.sin(toCoreA) * rad;
+          const rockGrad = ctx.createLinearGradient(gx, gy, -gx, -gy);
+          rockGrad.addColorStop(0, '#64748B');
+          rockGrad.addColorStop(0.55, '#1E293B');
+          rockGrad.addColorStop(1, '#090E1A');
+          ctx.fillStyle = rockGrad;
+          ctx.fill();
+
+          ctx.strokeStyle = `rgba(${body.hotRgb}, 0.36)`;
+          ctx.lineWidth = 0.7;
+          ctx.stroke();
+          ctx.restore();
+        };
+
         ctx.save();
         ctx.translate(bx, by);
 
-        // Outer relativistic gravitational lensing aura
-        const lensR = br * 2.45;
-        const lensGrad = ctx.createRadialGradient(0, 0, br * 0.72, 0, 0, lensR);
-        lensGrad.addColorStop(0, `rgba(${body.accretionRgb}, 0.36)`);
-        lensGrad.addColorStop(0.45, `rgba(${body.accretionRgb}, 0.14)`);
+        // 1. Deep gravitational halo (secondary violet/indigo + primary electric glow)
+        const lensR = br * 2.95;
+        const lensGrad = ctx.createRadialGradient(0, 0, horizonR * 0.85, 0, 0, lensR);
+        lensGrad.addColorStop(0, `rgba(${body.secondaryRgb}, 0.36)`);
+        lensGrad.addColorStop(0.32, `rgba(${body.accretionRgb}, 0.24)`);
+        lensGrad.addColorStop(0.66, `rgba(${body.secondaryRgb}, 0.07)`);
         lensGrad.addColorStop(1, 'rgba(11, 19, 32, 0)');
         ctx.fillStyle = lensGrad;
         ctx.beginPath();
         ctx.arc(0, 0, lensR, 0, Math.PI * 2);
         ctx.fill();
 
-        // Back half of relativistic accretion disk
+        // Rotate disk plane for relativistic lensing arches + back accretion plane
         ctx.save();
         ctx.rotate(body.diskTilt);
-        ctx.strokeStyle = `rgba(${body.accretionRgb}, 0.58)`;
-        ctx.lineWidth = Math.max(3, br * 0.24);
+
+        // 2. Gargantua-style gravitational lensing arcs wrapping over & under the shadow
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        for (let lIdx = 0; lIdx < 6; lIdx++) {
+          const frac = lIdx / 5;
+          const archR = horizonR * (1.03 + frac * 0.48);
+          const stretchX = archR * (1.04 + frac * 0.16);
+          const alpha = (0.48 - frac * 0.34).toFixed(3);
+          ctx.strokeStyle =
+            lIdx < 2 ? `rgba(${body.hotRgb}, ${alpha})` : `rgba(${body.accretionRgb}, ${alpha})`;
+          ctx.lineWidth = Math.max(0.85, br * (0.048 - frac * 0.025));
+
+          // Upper warped halo stream
+          ctx.beginPath();
+          ctx.ellipse(0, -horizonR * 0.05, stretchX, archR * 1.06, 0, Math.PI * 1.02, Math.PI * 1.98);
+          ctx.stroke();
+
+          // Lower warped halo stream
+          ctx.beginPath();
+          ctx.ellipse(0, horizonR * 0.05, stretchX * 0.96, archR * 0.94, 0, Math.PI * 0.04, Math.PI * 0.96);
+          ctx.stroke();
+        }
+
+        // 3. Back half of accretion disk & swirling plasma filaments
+        const backGlow = ctx.createRadialGradient(0, 0, horizonR * 0.95, 0, 0, diskRx);
+        backGlow.addColorStop(0, `rgba(${body.hotRgb}, 0.62)`);
+        backGlow.addColorStop(0.32, `rgba(${body.accretionRgb}, 0.45)`);
+        backGlow.addColorStop(0.7, `rgba(${body.secondaryRgb}, 0.18)`);
+        backGlow.addColorStop(1, `rgba(${body.secondaryRgb}, 0)`);
+        ctx.strokeStyle = backGlow;
+        ctx.lineWidth = Math.max(4, br * 0.32);
         ctx.beginPath();
-        ctx.ellipse(0, 0, br * 2.22, br * 0.52, 0, Math.PI, Math.PI * 2);
+        ctx.ellipse(0, 0, diskRx * 0.88, diskRy, 0, Math.PI, Math.PI * 2);
         ctx.stroke();
 
-        ctx.strokeStyle = `rgba(${body.hotRgb}, 0.42)`;
-        ctx.lineWidth = Math.max(1.4, br * 0.09);
+        // Animated swirling inner accretion streaks (back half)
+        ctx.save();
+        ctx.lineCap = 'round';
+        for (let sIdx = 0; sIdx < 4; sIdx++) {
+          const sFrac = sIdx / 3;
+          const rx = horizonR * (1.28 + sFrac * 1.48);
+          const ry = diskRy * (0.42 + sFrac * 0.58);
+          ctx.strokeStyle =
+            sIdx === 0
+              ? `rgba(${body.hotRgb}, 0.68)`
+              : `rgba(${body.accretionRgb}, ${(0.42 - sFrac * 0.22).toFixed(2)})`;
+          ctx.lineWidth = Math.max(0.9, br * (0.065 - sFrac * 0.032));
+          ctx.setLineDash([br * (0.55 + sFrac * 0.4), br * (0.35 + sFrac * 0.35)]);
+          ctx.lineDashOffset = -spin * br * (1.6 - sFrac * 0.5);
+          ctx.beginPath();
+          ctx.ellipse(0, 0, rx, ry, 0, Math.PI * 1.02, Math.PI * 1.98);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+        ctx.restore();
+        ctx.restore(); // end screen blend for back lensing/disk
+
+        // Back orbiting rocky asteroids (behind the event horizon)
+        for (let d = 0; d < body.debris.length; d++) {
+          const deb = body.debris[d];
+          const orbA = deb.angleOffset + t * deb.speed * body.spinDir;
+          if (Math.sin(orbA) >= 0) continue;
+          const ax = Math.cos(orbA) * br * deb.orbitMul;
+          const ay = Math.sin(orbA) * diskRy * (deb.orbitMul / 2.2);
+          drawAsteroidChunk(ax, ay, Math.max(1.6, br * deb.sizeMul), deb.rotOffset + t * deb.rotSpeed, deb.pts);
+        }
+
+        ctx.restore(); // restore unrotated before sphere
+
+        // 4. Event Horizon Sphere (pitch-black void with subtle internal warped void contour)
+        ctx.save();
         ctx.beginPath();
-        ctx.ellipse(0, 0, br * 1.85, br * 0.42, 0, Math.PI, Math.PI * 2);
+        ctx.arc(0, 0, horizonR, 0, Math.PI * 2);
+        ctx.clip();
+
+        const voidGrad = ctx.createRadialGradient(
+          -body.flareSide * horizonR * 0.28,
+          horizonR * 0.2,
+          horizonR * 0.1,
+          0,
+          0,
+          horizonR * 1.05
+        );
+        voidGrad.addColorStop(0, '#0C1322');
+        voidGrad.addColorStop(0.55, '#03060E');
+        voidGrad.addColorStop(1, '#010205');
+        ctx.fillStyle = voidGrad;
+        ctx.fillRect(-horizonR - 2, -horizonR - 2, horizonR * 2 + 4, horizonR * 2 + 4);
+
+        // Subtle warped interior void swirl (inspired by reference dark sphere depth)
+        ctx.strokeStyle = `rgba(${body.accretionRgb}, 0.09)`;
+        ctx.lineWidth = Math.max(1, br * 0.05);
+        ctx.beginPath();
+        ctx.arc(body.flareSide * horizonR * 0.16, -horizonR * 0.1, horizonR * 0.62, 0.4, 3.6);
         ctx.stroke();
         ctx.restore();
 
-        // Pitch-black event horizon core + luminous photon sphere ring
-        ctx.fillStyle = '#03050B';
+        // Crisp luminous photon ring around the event horizon
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        const rimGrad = ctx.createLinearGradient(
+          -horizonR * body.flareSide,
+          horizonR * 0.5,
+          horizonR * body.flareSide,
+          -horizonR * 0.5
+        );
+        rimGrad.addColorStop(0, `rgba(${body.secondaryRgb}, 0.42)`);
+        rimGrad.addColorStop(0.52, `rgba(${body.accretionRgb}, 0.78)`);
+        rimGrad.addColorStop(1, `rgba(${body.hotRgb}, 0.96)`);
+        ctx.strokeStyle = rimGrad;
+        ctx.lineWidth = Math.max(1.5, br * 0.07);
         ctx.beginPath();
-        ctx.arc(0, 0, br * 0.86, 0, Math.PI * 2);
+        ctx.arc(0, 0, horizonR + 0.6, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Thin bright crescent photon edge on Doppler-boosted side
+        ctx.strokeStyle = `rgba(${body.hotRgb}, 0.85)`;
+        ctx.lineWidth = Math.max(1, br * 0.04);
+        const crescentBase = body.flareSide > 0 ? -0.45 : Math.PI - 0.45;
+        ctx.beginPath();
+        ctx.arc(0, 0, horizonR + 1.2, crescentBase - 0.85, crescentBase + 0.85);
+        ctx.stroke();
+        ctx.restore();
+
+        // 5. Front Accretion Disk & Debris crossing across the black hole face
+        ctx.save();
+        ctx.rotate(body.diskTilt);
+
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+
+        // Outer electric plasma band crossing front
+        const frontGrad = ctx.createRadialGradient(0, 0, horizonR * 0.8, 0, 0, diskRx);
+        frontGrad.addColorStop(0, `rgba(${body.hotRgb}, 0.86)`);
+        frontGrad.addColorStop(0.36, `rgba(${body.accretionRgb}, 0.68)`);
+        frontGrad.addColorStop(0.75, `rgba(${body.secondaryRgb}, 0.24)`);
+        frontGrad.addColorStop(1, `rgba(${body.secondaryRgb}, 0)`);
+        ctx.strokeStyle = frontGrad;
+        ctx.lineWidth = Math.max(3.6, br * 0.26);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, diskRx * 0.9, diskRy, 0, 0.02, Math.PI - 0.02);
+        ctx.stroke();
+
+        // Razor-sharp inner white-hot accretion ribbon crossing front
+        ctx.strokeStyle = `rgba(${body.hotRgb}, 0.88)`;
+        ctx.lineWidth = Math.max(1.4, br * 0.085);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, br * 1.85, diskRy * 0.62, 0, 0.08, Math.PI - 0.08);
+        ctx.stroke();
+
+        // Diagonal relativistic plasma jet / disk wing streaks extending outward
+        const wingGrad = ctx.createLinearGradient(-diskRx * 1.12, 0, diskRx * 1.12, 0);
+        wingGrad.addColorStop(0, 'rgba(0,0,0,0)');
+        wingGrad.addColorStop(0.24, `rgba(${body.accretionRgb}, 0.48)`);
+        wingGrad.addColorStop(0.5, `rgba(${body.hotRgb}, 0.72)`);
+        wingGrad.addColorStop(0.76, `rgba(${body.accretionRgb}, 0.48)`);
+        wingGrad.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = wingGrad;
+        ctx.beginPath();
+        ctx.ellipse(0, diskRy * 0.16, diskRx * 1.12, Math.max(1.2, br * 0.06), 0, 0, Math.PI * 2);
         ctx.fill();
 
-        ctx.strokeStyle = `rgba(${body.hotRgb}, 0.85)`;
-        ctx.lineWidth = Math.max(1.4, br * 0.065);
-        ctx.beginPath();
-        ctx.arc(0, 0, br * 0.88, 0, Math.PI * 2);
-        ctx.stroke();
-
-        // Swirling matter arcs around photon ring
-        ctx.save();
-        ctx.rotate(spin);
-        ctx.strokeStyle = `rgba(${body.accretionRgb}, 0.48)`;
-        ctx.lineWidth = Math.max(1, br * 0.045);
-        ctx.setLineDash([br * 0.42, br * 0.55]);
-        ctx.beginPath();
-        ctx.arc(0, 0, br * 1.12, 0, Math.PI * 2);
-        ctx.stroke();
+        // Animated foreground plasma flow lines
+        ctx.lineCap = 'round';
+        for (let fIdx = 0; fIdx < 3; fIdx++) {
+          const rx = horizonR * (1.24 + fIdx * 0.56);
+          const ry = diskRy * (0.48 + fIdx * 0.28);
+          ctx.strokeStyle =
+            fIdx === 0 ? `rgba(${body.hotRgb}, 0.76)` : `rgba(${body.accretionRgb}, 0.48)`;
+          ctx.lineWidth = Math.max(0.9, br * (0.052 - fIdx * 0.014));
+          ctx.setLineDash([br * (0.48 + fIdx * 0.25), br * (0.34 + fIdx * 0.22)]);
+          ctx.lineDashOffset = spin * br * (1.7 - fIdx * 0.35);
+          ctx.beginPath();
+          ctx.ellipse(0, 0, rx, ry, 0, 0.05, Math.PI - 0.05);
+          ctx.stroke();
+        }
         ctx.setLineDash([]);
         ctx.restore();
 
-        // Bright front arc of accretion disk crossing over the black hole horizon
+        // Front orbiting rocky asteroids & shredded debris fragments
+        for (let d = 0; d < body.debris.length; d++) {
+          const deb = body.debris[d];
+          const orbA = deb.angleOffset + t * deb.speed * body.spinDir;
+          if (Math.sin(orbA) < 0) continue;
+          const ax = Math.cos(orbA) * br * deb.orbitMul;
+          const ay = Math.sin(orbA) * diskRy * (deb.orbitMul / 2.2);
+          drawAsteroidChunk(ax, ay, Math.max(1.8, br * deb.sizeMul), deb.rotOffset + t * deb.rotSpeed, deb.pts);
+        }
+
+        // 6. Relativistic Doppler Hotspot & Anamorphic Lens-Flare Glint (as in reference images)
+        const flareX = body.flareSide * horizonR * 1.06;
+        const flareY = -horizonR * 0.26;
+        const flarePulse = 0.88 + 0.12 * Math.sin(t * 2.2);
+
         ctx.save();
-        ctx.rotate(body.diskTilt);
-        ctx.strokeStyle = `rgba(${body.accretionRgb}, 0.72)`;
-        ctx.lineWidth = Math.max(3.2, br * 0.25);
+        ctx.globalCompositeOperation = 'screen';
+        const hotspot = ctx.createRadialGradient(flareX, flareY, 0, flareX, flareY, br * 0.92 * flarePulse);
+        hotspot.addColorStop(0, `rgba(${body.hotRgb}, 0.95)`);
+        hotspot.addColorStop(0.28, `rgba(${body.accretionRgb}, 0.56)`);
+        hotspot.addColorStop(1, `rgba(${body.accretionRgb}, 0)`);
+        ctx.fillStyle = hotspot;
         ctx.beginPath();
-        ctx.ellipse(0, 0, br * 2.22, br * 0.52, 0, 0, Math.PI);
-        ctx.stroke();
+        ctx.arc(flareX, flareY, br * 0.92 * flarePulse, 0, Math.PI * 2);
+        ctx.fill();
 
-        ctx.strokeStyle = `rgba(${body.hotRgb}, 0.72)`;
-        ctx.lineWidth = Math.max(1.4, br * 0.09);
+        // Razor-thin anamorphic flare streak piercing across the Doppler hotspot
+        const streakLen = br * 2.55 * flarePulse;
+        const streakGrad = ctx.createLinearGradient(flareX - streakLen, flareY, flareX + streakLen, flareY);
+        streakGrad.addColorStop(0, `rgba(${body.accretionRgb}, 0)`);
+        streakGrad.addColorStop(0.35, `rgba(${body.accretionRgb}, 0.45)`);
+        streakGrad.addColorStop(0.5, `rgba(${body.hotRgb}, 0.92)`);
+        streakGrad.addColorStop(0.65, `rgba(${body.accretionRgb}, 0.45)`);
+        streakGrad.addColorStop(1, `rgba(${body.accretionRgb}, 0)`);
+        ctx.fillStyle = streakGrad;
         ctx.beginPath();
-        ctx.ellipse(0, 0, br * 1.85, br * 0.42, 0, 0, Math.PI);
-        ctx.stroke();
+        ctx.ellipse(flareX, flareY, streakLen, Math.max(1.1, br * 0.042), 0, 0, Math.PI * 2);
+        ctx.fill();
         ctx.restore();
 
-        ctx.restore();
+        ctx.restore(); // end diskTilt
+        ctx.restore(); // end black_hole translate
         continue;
       }
 
@@ -3545,33 +3737,36 @@ export class SolarisEngine {
     const minDim = Math.min(w, h);
     const maxRadius = Math.hypot(w, h) * 1.15;
 
-    // Ship dimensions & clean top-right framing (prevents bottom clipping, right overshoot, and exposed top cut seam)
+    // Ship dimensions & clean top-right framing (fits entire nose + upper wing cleanly across aspect ~1.46)
     const frontPair = this.sprites.PLAYER_FRONT;
-    const imgAspect = frontPair ? frontPair.normal.width / frontPair.normal.height : 4 / 3;
+    const imgAspect = frontPair ? frontPair.normal.width / frontPair.normal.height : 819 / 559;
     const isNarrow = w < h * 1.15;
-    const shipH = isNarrow ? Math.min(h * 0.72, w * 0.62) : Math.min(h * 0.78, w * 0.45);
+    const shipH = isNarrow
+      ? Math.min(h * 0.46, (w * 0.84) / imgAspect)
+      : Math.min(h * 0.66, (w * 0.55) / imgAspect);
     const shipW = shipH * imgAspect;
     const bobX = Math.sin(t * 1.5) * 3.5 + Math.cos(t * 3.7) * 1.0;
     const bobY = Math.cos(t * 2.0) * 3.5 + Math.sin(t * 4.9) * 0.9;
     const pitchMicro = Math.sin(t * 1.2) * 0.012 + Math.cos(t * 3.1) * 0.003;
     const breathScale = 1 + Math.sin(t * 2.6) * 0.007;
 
-    const rightBleed = Math.max(10, shipW * 0.015);
+    const rightBleed = Math.max(24, shipW * 0.08);
+    const topPad = Math.max(18, h * 0.045);
     const shipCenterX = w - shipW * 0.5 + rightBleed + bobX;
-    const shipCenterY = shipH * 0.488 + bobY;
+    const shipCenterY = topPad + shipH * 0.5 + bobY;
 
-    // Exact measured ship fuselage centerline vector from artwork (nose lower-left -> tail upper-right = -37.5 deg)
+    // Exact measured ship fuselage centerline vector from artwork (nose lower-left -> tail upper-right = -26.4 deg)
     // Coupled live to pitchMicro so warp lines stay 100% locked to the ship's current heading vector
-    const baseFuselageAngle = -0.655;
+    const baseFuselageAngle = -0.46;
     const axisAngle = baseFuselageAngle + pitchMicro;
     const axisCos = Math.cos(axisAngle); // backward along fuselage (toward upper-right)
     const axisSin = Math.sin(axisAngle);
 
-    // Exact nose tip in screen space (measured from artwork at [-0.42 * shipW, +0.40 * shipH])
+    // Exact nose tip in screen space (measured from artwork at [-0.494 * shipW, +0.368 * shipH])
     const cosP = Math.cos(pitchMicro);
     const sinP = Math.sin(pitchMicro);
-    const localNoseX = -0.42 * shipW * breathScale;
-    const localNoseY = 0.4 * shipH * breathScale;
+    const localNoseX = -0.494 * shipW * breathScale;
+    const localNoseY = 0.368 * shipH * breathScale;
     const noseTipX = shipCenterX + localNoseX * cosP - localNoseY * sinP;
     const noseTipY = shipCenterY + localNoseX * sinP + localNoseY * cosP;
 
@@ -3733,8 +3928,12 @@ export class SolarisEngine {
       ctx.restore();
     };
 
-    // 5. Background speed streaks rushing past behind the Solaris ship
+    // 5. All speed streaks rushing past strictly behind the Solaris ship
     renderRadialWarpStreaks(false);
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    renderRadialWarpStreaks(true);
+    ctx.restore();
 
     // 6. Solaris Ship — Dramatic 3/4 Front-Side Close-Up + Live Warp Reflections on the Cockpit Canopy Glass
     ctx.save();
@@ -3743,89 +3942,87 @@ export class SolarisEngine {
     ctx.scale(breathScale, breathScale);
 
     // Subtle cosmic warp light reflection across the nose & cockpit side
-    const rimHalo = ctx.createRadialGradient(-shipW * 0.3, shipH * 0.22, shipH * 0.04, -shipW * 0.1, shipH * 0.08, shipW * 0.72);
+    const rimHalo = ctx.createRadialGradient(-shipW * 0.34, shipH * 0.24, shipH * 0.04, -shipW * 0.08, shipH * 0.06, shipW * 0.72);
     rimHalo.addColorStop(0, `rgba(248, ${Math.round(165 + 55 * goldPhase)}, 235, 0.34)`);
     rimHalo.addColorStop(0.45, 'rgba(232, 184, 75, 0.16)');
     rimHalo.addColorStop(1, 'rgba(11, 19, 32, 0)');
     ctx.fillStyle = rimHalo;
     ctx.beginPath();
-    ctx.arc(-shipW * 0.1, shipH * 0.08, shipW * 0.72, 0, Math.PI * 2);
+    ctx.arc(-shipW * 0.08, shipH * 0.06, shipW * 0.72, 0, Math.PI * 2);
     ctx.fill();
 
     if (frontPair) {
       ctx.drawImage(frontPair.normal, -shipW / 2, -shipH / 2, shipW, shipH);
 
-      // 6b. Live Hyperspace Warp Reflections clipped strictly to the full curved cockpit canopy glass (including upper dome)
+      // 6b. Live Hyperspace Warp Reflections clipped strictly to the curved cockpit canopy glass
       ctx.save();
       ctx.beginPath();
-      // Full curved dome silhouette of the Solaris glass canopy in ship-centered coordinates
-      ctx.moveTo(-0.045 * shipW, -0.115 * shipH);
+      ctx.moveTo(-0.002 * shipW, -0.098 * shipH);
       ctx.bezierCurveTo(
-        0.025 * shipW, -0.295 * shipH,
-        0.165 * shipW, -0.355 * shipH,
-        0.282 * shipW, -0.255 * shipH
+        0.065 * shipW, -0.235 * shipH,
+        0.22 * shipW, -0.278 * shipH,
+        0.335 * shipW, -0.165 * shipH
       );
       ctx.bezierCurveTo(
-        0.312 * shipW, -0.205 * shipH,
-        0.302 * shipW, -0.13 * shipH,
-        0.245 * shipW, -0.075 * shipH
+        0.36 * shipW, -0.105 * shipH,
+        0.348 * shipW, -0.015 * shipH,
+        0.275 * shipW, 0.042 * shipH
       );
       ctx.bezierCurveTo(
-        0.145 * shipW, -0.012 * shipH,
-        0.015 * shipW, -0.025 * shipH,
-        -0.045 * shipW, -0.115 * shipH
+        0.175 * shipW, 0.078 * shipH,
+        0.045 * shipW, 0.02 * shipH,
+        -0.002 * shipW, -0.098 * shipH
       );
       ctx.closePath();
       ctx.clip();
 
       ctx.globalCompositeOperation = 'screen';
 
-      // Shifting cosmic nebula sheen reflected across the ENTIRE curved dome (especially bright on the upper crest)
+      // Shifting cosmic nebula sheen reflected across the curved dome
       const upperReflGrad = ctx.createRadialGradient(
-        0.09 * shipW, -0.26 * shipH, shipH * 0.015,
-        0.13 * shipW, -0.19 * shipH, shipW * 0.26
+        0.15 * shipW, -0.17 * shipH, shipH * 0.015,
+        0.175 * shipW, -0.105 * shipH, shipW * 0.25
       );
       upperReflGrad.addColorStop(
         0,
-        `rgba(255, ${Math.round(215 + 35 * goldPhase)}, ${Math.round(238 + 17 * magentaPhase)}, 0.56)`
+        `rgba(255, ${Math.round(215 + 35 * goldPhase)}, ${Math.round(238 + 17 * magentaPhase)}, 0.52)`
       );
       upperReflGrad.addColorStop(
         0.45,
-        `rgba(${Math.round(215 + 35 * crimsonPhase)}, ${Math.round(115 + 65 * goldPhase)}, ${Math.round(235 - 45 * crimsonPhase)}, 0.34)`
+        `rgba(${Math.round(215 + 35 * crimsonPhase)}, ${Math.round(115 + 65 * goldPhase)}, ${Math.round(235 - 45 * crimsonPhase)}, 0.3)`
       );
-      upperReflGrad.addColorStop(0.85, 'rgba(104, 214, 220, 0.14)');
+      upperReflGrad.addColorStop(0.85, 'rgba(104, 214, 220, 0.12)');
       upperReflGrad.addColorStop(1, 'rgba(11, 19, 32, 0)');
       ctx.fillStyle = upperReflGrad;
-      ctx.fillRect(-0.08 * shipW, -0.38 * shipH, 0.44 * shipW, 0.38 * shipH);
+      ctx.fillRect(-0.02 * shipW, -0.29 * shipH, 0.4 * shipW, 0.38 * shipH);
 
-      // Animated warp light streaks gliding backward across both upper & lower halves of the curved glass
+      // Animated warp light streaks gliding backward across the curved glass
       ctx.globalCompositeOperation = 'lighter';
       ctx.lineCap = 'round';
       const localCos = Math.cos(baseFuselageAngle);
       const localSin = Math.sin(baseFuselageAngle);
       const localPerpX = -localSin;
       const localPerpY = localCos;
-      const canopyCenterX = 0.13 * shipW;
-      const canopyCenterY = -0.185 * shipH;
+      const canopyCenterX = 0.175 * shipW;
+      const canopyCenterY = -0.105 * shipH;
 
       for (let r = 0; r < 12; r++) {
         const speed = 1.45 + (r % 4) * 0.52;
         const p = (t * speed + r * 0.23) % 1;
-        const along = (p - 0.5) * shipW * 0.44;
-        const across = ((r / 11) - 0.5) * shipH * 0.28;
-        const len = shipW * (0.08 + (r % 3) * 0.042);
+        const along = (p - 0.5) * shipW * 0.38;
+        const across = ((r / 11) - 0.5) * shipH * 0.24;
+        const len = shipW * (0.075 + (r % 3) * 0.038);
 
         const sx = canopyCenterX + localCos * along + localPerpX * across;
         const sy = canopyCenterY + localSin * along + localPerpY * across;
         const ex = sx + localCos * len;
         const ey = sy + localSin * len;
 
-        // Parabolic curve mimicking reflections bending over the convex glass dome
-        const midX = (sx + ex) * 0.5 + localPerpX * (across * 0.26);
-        const midY = (sy + ey) * 0.5 + localPerpY * (across * 0.26);
+        const midX = (sx + ex) * 0.5 + localPerpX * (across * 0.24);
+        const midY = (sy + ey) * 0.5 + localPerpY * (across * 0.24);
 
         const fade = Math.sin(p * Math.PI);
-        const streakAlpha = fade * (r % 3 === 0 ? 0.58 : 0.4);
+        const streakAlpha = fade * (r % 3 === 0 ? 0.54 : 0.36);
         const streakColor =
           r % 4 === 0
             ? '#FFFFFF'
@@ -3837,35 +4034,29 @@ export class SolarisEngine {
 
         ctx.globalAlpha = streakAlpha;
         ctx.strokeStyle = streakColor;
-        ctx.lineWidth = r % 3 === 0 ? 2.5 : 1.5;
+        ctx.lineWidth = r % 3 === 0 ? 2.4 : 1.4;
         ctx.beginPath();
         ctx.moveTo(sx, sy);
         ctx.quadraticCurveTo(midX, midY, ex, ey);
         ctx.stroke();
       }
 
-      // Crisp upper-crest Fresnel highlight rim along the full top arch of the curved glass canopy
-      ctx.globalAlpha = 0.44 + 0.14 * Math.sin(t * 5.2);
+      // Crisp upper-crest Fresnel highlight rim along the top arch of the glass canopy
+      ctx.globalAlpha = 0.42 + 0.14 * Math.sin(t * 5.2);
       ctx.strokeStyle = '#FFF7E8';
-      ctx.lineWidth = 2.6;
+      ctx.lineWidth = 2.4;
       ctx.beginPath();
-      ctx.moveTo(-0.028 * shipW, -0.135 * shipH);
+      ctx.moveTo(0.018 * shipW, -0.115 * shipH);
       ctx.bezierCurveTo(
-        0.045 * shipW, -0.275 * shipH,
-        0.165 * shipW, -0.325 * shipH,
-        0.265 * shipW, -0.245 * shipH
+        0.085 * shipW, -0.225 * shipH,
+        0.22 * shipW, -0.258 * shipH,
+        0.32 * shipW, -0.155 * shipH
       );
       ctx.stroke();
 
       ctx.restore();
     }
 
-    ctx.restore();
-
-    // 7. Subtle foreground warp streaks passing in front of the scene (low alpha so they never cut harshly through the hull)
-    ctx.save();
-    ctx.globalAlpha = 0.42;
-    renderRadialWarpStreaks(true);
     ctx.restore();
   }
 
@@ -4917,18 +5108,21 @@ export class SolarisEngine {
     if (t < 3.35) {
       // ACT 1: Orbit around LEFT flank to rear + Hyper-warp launch leaving camera behind
       const frontPair = this.sprites.PLAYER_FRONT;
-      const imgAspect = frontPair ? frontPair.normal.width / frontPair.normal.height : 4 / 3;
+      const imgAspect = frontPair ? frontPair.normal.width / frontPair.normal.height : 819 / 559;
       const isNarrow = w < h * 1.15;
-      const shipH0 = isNarrow ? Math.min(h * 0.72, w * 0.62) : Math.min(h * 0.78, w * 0.45);
+      const shipH0 = isNarrow
+        ? Math.min(h * 0.46, (w * 0.84) / imgAspect)
+        : Math.min(h * 0.66, (w * 0.55) / imgAspect);
       const shipW0 = shipH0 * imgAspect;
-      const rightBleed = Math.max(10, shipW0 * 0.015);
+      const rightBleed = Math.max(24, shipW0 * 0.08);
+      const topPad0 = Math.max(18, h * 0.045);
       const cx0 = w - shipW0 * 0.5 + rightBleed;
-      const cy0 = shipH0 * 0.488;
-      const baseFuselageAngle = -0.655;
+      const cy0 = topPad0 + shipH0 * 0.5;
+      const baseFuselageAngle = -0.46;
       const axisCos0 = Math.cos(baseFuselageAngle);
       const axisSin0 = Math.sin(baseFuselageAngle);
-      const nose0X = cx0 - 0.42 * shipW0;
-      const nose0Y = cy0 + 0.4 * shipH0;
+      const nose0X = cx0 - 0.494 * shipW0;
+      const nose0Y = cy0 + 0.368 * shipH0;
       const vpDist0 = Math.hypot(w, h) * 0.92;
       const vp0X = nose0X - axisCos0 * vpDist0;
       const vp0Y = nose0Y - axisSin0 * vpDist0;
@@ -5106,16 +5300,24 @@ export class SolarisEngine {
       };
 
       drawTunnelStreaks(false);
+      if (t < 0.18) {
+        ctx.save();
+        ctx.globalAlpha = 0.55;
+        drawTunnelStreaks(true);
+        ctx.restore();
+      }
 
       // 6. Ship Orbit & Hyper-Warp Departure
-      const shipStartX = w * 0.55;
-      const shipStartY = h * 0.49;
+      const shipStartX = isNarrow ? w * 0.58 : w * 0.62;
+      const shipStartY = isNarrow
+        ? Math.max(cy0 + shipH0 * 0.08, h * 0.36)
+        : Math.max(cy0 + shipH0 * 0.04, h * 0.44);
       const shipTargetX = w * 0.5;
       const shipTargetY = h * 0.54;
       const orbitShipX = shipStartX + (shipTargetX - shipStartX) * orbit;
       const orbitShipY = shipStartY + (shipTargetY - shipStartY) * orbit;
 
-      // Phase A: Keep title closeup strictly anchored to top-right while fading out over 0.18s so its cropped JPG borders never drag into mid-screen
+      // Phase A: Keep title closeup strictly anchored to top-right while fading out over 0.18s
       if (frontPair && t < 0.18) {
         const frontFade = Math.max(0, 1 - t / 0.18);
         if (frontFade > 0.01) {
@@ -5139,7 +5341,7 @@ export class SolarisEngine {
         const projU = t < 1.75 ? 0 : 1 - 1 / depthZ;
         const shipDrawX = orbitShipX + (vpX - orbitShipX) * projU;
         const shipDrawY = orbitShipY + (vpY - orbitShipY) * projU;
-        const baseScale = isNarrow ? minDim * 0.175 : Math.min(w * 0.145, h * 0.195);
+        const baseScale = isNarrow ? minDim * 0.15 : Math.min(w * 0.14, h * 0.19);
         const shipScale = baseScale / depthZ;
         const engineHeat = t < 1.75 ? 0.65 + orbit * 0.85 : 2.6 - launchRaw * 0.8;
         const disappearAlpha = launchRaw > 0.72 ? Math.max(0, 1 - (launchRaw - 0.72) / 0.24) : 1;
@@ -5224,7 +5426,9 @@ export class SolarisEngine {
         ctx.restore();
       }
 
-      drawTunnelStreaks(true);
+      if (t >= 0.18) {
+        drawTunnelStreaks(true);
+      }
       ctx.restore(); // end camZoom
 
       // Subtle golden warp pulse during 0 -> 0.26s crossfade from title close-up
