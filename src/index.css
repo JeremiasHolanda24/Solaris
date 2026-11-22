@@ -195,53 +195,6 @@
   animation: rotate-to-landscape 2.4s cubic-bezier(0.22, 1, 0.36, 1) infinite;
 }
 
-@keyframes overdrive-screen-surge {
-  0% {
-    opacity: 0;
-    transform: scale(0.92);
-    backdrop-filter: saturate(1) contrast(1) hue-rotate(0deg);
-  }
-  12% {
-    opacity: 0.95;
-    transform: scale(1.04);
-    backdrop-filter: saturate(2.15) contrast(1.18) hue-rotate(24deg);
-  }
-  42% {
-    opacity: 0.7;
-    transform: scale(1.015);
-    backdrop-filter: saturate(1.7) contrast(1.1) hue-rotate(-18deg);
-  }
-  100% {
-    opacity: 0;
-    transform: scale(1.12);
-    backdrop-filter: saturate(1) contrast(1) hue-rotate(0deg);
-  }
-}
-
-.animate-overdrive-surge {
-  animation: overdrive-screen-surge 1.25s cubic-bezier(0.16, 1, 0.3, 1) both;
-  will-change: transform, opacity, backdrop-filter;
-}
-
-@keyframes overdrive-prism-ring {
-  0% {
-    opacity: 0.95;
-    transform: scale(0.15) rotate(0deg);
-  }
-  60% {
-    opacity: 0.65;
-  }
-  100% {
-    opacity: 0;
-    transform: scale(1.85) rotate(65deg);
-  }
-}
-
-.animate-overdrive-prism-ring {
-  animation: overdrive-prism-ring 1.15s cubic-bezier(0.12, 0.85, 0.25, 1) both;
-  will-change: transform, opacity;
-}
-
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

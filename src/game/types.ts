@@ -24,7 +24,6 @@ export interface HudSnapshot {
   damagePulseId: number;
   repairAnimRatio: number; // 0..1
   repairPulseId: number;
-  overdrivePulseId: number;
 }
 
 export interface Enemy {

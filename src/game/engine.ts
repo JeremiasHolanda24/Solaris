@@ -102,9 +102,6 @@ export class SolarisEngine {
   private readonly repairAnimDuration = 1.4;
   private repairPulseId = 0;
   private repairMoteAccum = 0;
-  private overdriveSurgeTimer = 0;
-  private readonly overdriveSurgeDuration = 1.35;
-  private overdrivePulseId = 0;
   private ambientTime = 0;
 
   // Dramatic Player Destruction Sequence
@@ -727,7 +724,6 @@ export class SolarisEngine {
     this.damageFlashTimer = 0;
     this.repairAnimTimer = 0;
     this.repairMoteAccum = 0;
-    this.overdriveSurgeTimer = 0;
 
     this.playerDying = false;
     this.playerDetonated = false;
@@ -1078,7 +1074,6 @@ export class SolarisEngine {
   private finishCutsceneToGameplay(skipped: boolean): void {
     this.state = 'PLAYING';
     this.arenaZoom = 1;
-    this.overdriveSurgeTimer = 0;
     this.cutsceneTimeScale = 1;
     this.cutsceneFlash = 0;
     this.cutsceneBolts[0].active = false;
@@ -1125,7 +1120,6 @@ export class SolarisEngine {
     this.state = 'TITLE_MENU';
     this.playerDying = false;
     this.playerDetonated = false;
-    this.overdriveSurgeTimer = 0;
     this.cutsceneSquadron = [];
     this.clearAllInputs();
     this.releaseAllEntities();
@@ -1977,10 +1971,6 @@ export class SolarisEngine {
       if (this.repairAnimTimer === 0) {
         this.emitHud();
       }
-    }
-
-    if (this.overdriveSurgeTimer > 0) {
-      this.overdriveSurgeTimer = Math.max(0, this.overdriveSurgeTimer - dt);
     }
 
     if (this.state === 'TITLE_MENU') {
@@ -2849,58 +2839,16 @@ export class SolarisEngine {
     const p = this.player;
     p.overdriveTimer = p.overdriveDuration;
     p.overdriveCharge = 100;
-    this.overdriveSurgeTimer = this.overdriveSurgeDuration;
-    this.overdrivePulseId += 1;
     this.audio.playOverdrive();
-    this.vibrate([22, 26, 36]);
-    this.hitstopTimer = Math.max(this.hitstopTimer, 0.045);
-    this.shakeIntensity = Math.max(this.shakeIntensity, 13);
+    this.vibrate([16, 20, 24]);
+    this.hitstopTimer = Math.max(this.hitstopTimer, 0.035);
+    this.shakeIntensity = Math.max(this.shakeIntensity, 8);
 
-    // Layered vibrant prismatic shockwaves radiating from the ship
-    const prismPalette = ['#FF2E93', '#22D3EE', '#FACC15', '#A855F7', '#34D399', '#FFFFFF'];
-    this.spawnShockwave(p.x, p.y, 340, '#FF2E93', 4.2, 0.62, true);
-    this.spawnShockwave(p.x, p.y, 290, '#22D3EE', 3.4, 0.52, true);
-    this.spawnShockwave(p.x, p.y, 235, '#FACC15', 3.0, 0.44, false);
-    this.spawnShockwave(p.x, p.y, 410, '#A855F7', 2.4, 0.72, false);
-
-    // High-energy chromatic starbursts, sparks & fractured prism arcs
-    for (let i = 0; i < 36; i++) {
-      const a = (i / 36) * Math.PI * 2 + (Math.random() - 0.5) * 0.16;
-      const spd = 190 + Math.random() * 340;
-      const col = prismPalette[i % prismPalette.length];
-      this.spawnParticle(
-        p.x,
-        p.y,
-        Math.cos(a) * spd,
-        Math.sin(a) * spd,
-        3.0 + Math.random() * 3.4,
-        0.42 + Math.random() * 0.42,
-        col,
-        0.92,
-        i % 3 === 0 ? 'star' : 'spark',
-        0,
-        a,
-        (Math.random() - 0.5) * 10
-      );
-    }
-    for (let i = 0; i < 8; i++) {
-      const a = (i / 8) * Math.PI * 2;
-      const spd = 140 + Math.random() * 140;
-      this.spawnParticle(
-        p.x,
-        p.y,
-        Math.cos(a) * spd,
-        Math.sin(a) * spd,
-        16 + Math.random() * 10,
-        0.48 + Math.random() * 0.25,
-        prismPalette[i % 4],
-        0.93,
-        'arc',
-        18,
-        a,
-        (Math.random() - 0.5) * 8
-      );
-    }
+    // Clean Solaris-palette shockwaves and radial sparks
+    this.spawnShockwave(p.x, p.y, 175, PALETTE.coralBright, 2.8, 0.44, true);
+    this.spawnShockwave(p.x, p.y, 125, PALETTE.brass, 2.0, 0.36, false);
+    this.spawnBurst(p.x, p.y, 16, PALETTE.coralBright, 240, 2.8);
+    this.spawnBurst(p.x, p.y, 8, PALETTE.ivory, 180, 2.2);
 
     for (let i = this.bullets.length - 1; i >= 0; i--) {
       if (!this.bullets[i].fromPlayer) {
@@ -2990,7 +2938,6 @@ export class SolarisEngine {
       damagePulseId: this.damagePulseId,
       repairAnimRatio: Math.max(0, Math.min(1, this.repairAnimTimer / this.repairAnimDuration)),
       repairPulseId: this.repairPulseId,
-      overdrivePulseId: this.overdrivePulseId,
     });
   }
 
@@ -3052,21 +2999,9 @@ export class SolarisEngine {
       return;
     }
 
-    let warpZoomOffset = 0;
-    let warpTwist = 0;
-    if (this.overdriveSurgeTimer > 0 && this.state === 'PLAYING') {
-      const surgeRatio = Math.max(0, Math.min(1, this.overdriveSurgeTimer / this.overdriveSurgeDuration));
-      const surgeProgress = 1 - surgeRatio;
-      warpZoomOffset = Math.sin(surgeProgress * Math.PI * 2.2) * 0.085 * Math.pow(surgeRatio, 1.3);
-      warpTwist = Math.sin(surgeProgress * 26) * 0.015 * Math.pow(surgeRatio, 1.45) * this.screenShakeScale;
-    }
-
     ctx.save();
     ctx.translate(w * 0.5, h * 0.5);
-    if (warpTwist !== 0) {
-      ctx.rotate(warpTwist);
-    }
-    const effectiveZoom = Math.max(0.5, this.arenaZoom + warpZoomOffset);
+    const effectiveZoom = Math.max(0.5, this.arenaZoom);
     ctx.scale(effectiveZoom, effectiveZoom);
     ctx.translate(-w * 0.5, -h * 0.5);
 
@@ -3100,14 +3035,6 @@ export class SolarisEngine {
 
     ctx.restore();
 
-    // Fullscreen Overdrive distortion & vibrant prismatic activation animation
-    if (
-      (this.overdriveSurgeTimer > 0 || this.player.overdriveTimer > 0) &&
-      (this.state === 'PLAYING' || this.state === 'GAME_OVER')
-    ) {
-      this.renderOverdriveFullscreenFx(ctx, w, h);
-    }
-
     // 60fps GPU-fast red damage impact vignette (avoids DOM/React repaints on mobile)
     if (this.damageFlashTimer > 0) {
       const ratio = Math.max(0, Math.min(1, this.damageFlashTimer / this.damageFlashDuration));
@@ -3119,181 +3046,6 @@ export class SolarisEngine {
       grad.addColorStop(1, `rgba(232, 65, 52, ${(ratio * 0.58).toFixed(3)})`);
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, w, h);
-    }
-  }
-
-  private renderOverdriveFullscreenFx(ctx: CanvasRenderingContext2D, w: number, h: number): void {
-    const p = this.player;
-    const maxDiag = Math.hypot(w, h);
-    const surgeRatio = Math.max(0, Math.min(1, this.overdriveSurgeTimer / this.overdriveSurgeDuration));
-    const progress = 1 - surgeRatio;
-
-    // Projected ship screen coordinates (clamped softly so off-screen activations still sweep cleanly)
-    const rawOx = (p.x - w * 0.5) * this.arenaZoom + w * 0.5;
-    const rawOy = (p.y - h * 0.5) * this.arenaZoom + h * 0.5;
-    const ox = Math.max(-w * 0.2, Math.min(w * 1.2, rawOx));
-    const oy = Math.max(-h * 0.2, Math.min(h * 1.2, rawOy));
-
-    // 1. Real-time fullscreen spatial wave distortion & chromatic split over the rendered frame
-    if (surgeRatio > 0.14) {
-      const cw = this.canvas.width;
-      const ch = this.canvas.height;
-      if (cw > 32 && ch > 32) {
-        const distPower = Math.pow((surgeRatio - 0.14) / 0.86, 1.35);
-        const stripCount = 26;
-        const stripH = Math.ceil(ch / stripCount);
-        const waveAmpPx = (18 * this.dpr * Math.max(0.35, this.screenShakeScale)) * distPower;
-        const shockCenterY = Math.max(0, Math.min(1, oy / Math.max(1, h)));
-        const shockProgressY = Math.min(1, progress * 1.45);
-
-        ctx.save();
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-
-        for (let i = 0; i < stripCount; i++) {
-          const sy = i * stripH;
-          const sh = Math.min(stripH, ch - sy);
-          if (sh <= 0) break;
-
-          const yNorm = (i + 0.5) / stripCount;
-          const distFromOriginY = Math.abs(yNorm - shockCenterY);
-          const waveBand = Math.exp(-Math.pow((distFromOriginY - shockProgressY * 0.9) * 3.8, 2));
-          const ripple = Math.sin(yNorm * 20 - progress * 34) * (0.42 + 0.58 * waveBand);
-          const dx = Math.round(ripple * waveAmpPx);
-          const dy = Math.round(Math.cos(yNorm * 14 + progress * 24) * waveAmpPx * 0.18);
-
-          if (dx !== 0 || dy !== 0) {
-            ctx.drawImage(this.canvas, 0, sy, cw, sh, dx, sy + dy, cw, sh);
-          }
-        }
-
-        // Chromatic RGB/CMY echo split across the viewport during peak surge
-        if (surgeRatio > 0.38) {
-          const splitAlpha = ((surgeRatio - 0.38) / 0.62) * 0.22;
-          const shift = Math.round(10 * this.dpr * ((surgeRatio - 0.38) / 0.62));
-          ctx.globalCompositeOperation = 'lighter';
-          ctx.globalAlpha = splitAlpha;
-          ctx.drawImage(this.canvas, -shift, -Math.round(shift * 0.4));
-          ctx.drawImage(this.canvas, shift, Math.round(shift * 0.4));
-        }
-
-        ctx.restore();
-        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-      }
-    }
-
-    // 2. Fullscreen vibrant spectrum flash, hyper-prism rays & triple chromatic expanding shockwaves
-    if (surgeRatio > 0) {
-      const eased = 1 - Math.pow(1 - progress, 3);
-      const envelope = Math.min(1, progress * 10) * Math.pow(surgeRatio, 0.85);
-
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-
-      // Fullscreen radial + prismatic gradient wash
-      const washR = Math.max(w, h) * (0.65 + eased * 0.75);
-      const washGrad = ctx.createRadialGradient(ox, oy, 8, ox, oy, washR);
-      washGrad.addColorStop(0, `rgba(255, 255, 255, ${(0.58 * Math.pow(surgeRatio, 2.2)).toFixed(3)})`);
-      washGrad.addColorStop(0.24, `rgba(250, 204, 21, ${(0.42 * envelope).toFixed(3)})`);
-      washGrad.addColorStop(0.52, `rgba(255, 46, 147, ${(0.34 * envelope).toFixed(3)})`);
-      washGrad.addColorStop(0.78, `rgba(34, 211, 238, ${(0.28 * envelope).toFixed(3)})`);
-      washGrad.addColorStop(1, 'rgba(168, 85, 247, 0)');
-      ctx.fillStyle = washGrad;
-      ctx.fillRect(0, 0, w, h);
-
-      // Diagonal vibrant neon edge bleed across the full viewport
-      const sweepOffset = (progress * 1.4 - 0.2) * w;
-      const sweepGrad = ctx.createLinearGradient(sweepOffset - w * 0.45, 0, sweepOffset + w * 0.45, h);
-      sweepGrad.addColorStop(0, 'rgba(34, 211, 238, 0)');
-      sweepGrad.addColorStop(0.28, `rgba(34, 211, 238, ${(0.24 * envelope).toFixed(3)})`);
-      sweepGrad.addColorStop(0.5, `rgba(255, 46, 147, ${(0.28 * envelope).toFixed(3)})`);
-      sweepGrad.addColorStop(0.72, `rgba(250, 204, 21, ${(0.22 * envelope).toFixed(3)})`);
-      sweepGrad.addColorStop(1, 'rgba(168, 85, 247, 0)');
-      ctx.fillStyle = sweepGrad;
-      ctx.fillRect(0, 0, w, h);
-
-      // Rotating vibrant radial hyper-prism light rays sweeping past screen corners
-      const rayCount = 18;
-      const rayColors = [
-        '255, 46, 147',   // Magenta
-        '34, 211, 238',   // Cyan
-        '250, 204, 21',   // Solar Gold
-        '168, 85, 247',   // Electric Violet
-        '52, 211, 153',   // Vivid Emerald
-      ];
-      for (let i = 0; i < rayCount; i++) {
-        const baseA = (i / rayCount) * Math.PI * 2 + progress * 0.55;
-        const spread = 0.022 + (i % 3) * 0.014;
-        const rayLen = maxDiag * (0.6 + eased * 0.65);
-        const rgb = rayColors[i % rayColors.length];
-        const rayAlpha = (0.16 + (i % 2) * 0.08) * envelope;
-
-        const rGrad = ctx.createLinearGradient(
-          ox,
-          oy,
-          ox + Math.cos(baseA) * rayLen,
-          oy + Math.sin(baseA) * rayLen
-        );
-        rGrad.addColorStop(0, `rgba(255, 255, 255, ${(rayAlpha * 1.4).toFixed(3)})`);
-        rGrad.addColorStop(0.35, `rgba(${rgb}, ${rayAlpha.toFixed(3)})`);
-        rGrad.addColorStop(1, `rgba(${rgb}, 0)`);
-
-        ctx.fillStyle = rGrad;
-        ctx.beginPath();
-        ctx.moveTo(ox, oy);
-        ctx.lineTo(ox + Math.cos(baseA - spread) * rayLen, oy + Math.sin(baseA - spread) * rayLen);
-        ctx.lineTo(ox + Math.cos(baseA + spread) * rayLen, oy + Math.sin(baseA + spread) * rayLen);
-        ctx.closePath();
-        ctx.fill();
-      }
-
-      // Triple Chromatic Aberration Expanding Fullscreen Distortion Rings
-      const baseR = 24 + eased * maxDiag * 1.08;
-      const ringSpecs = [
-        { dr: -14 * surgeRatio, rgb: '255, 46, 147', lw: 5.5, wobbleAmp: 7 },
-        { dr: 0, rgb: '250, 204, 21', lw: 4.5, wobbleAmp: 4 },
-        { dr: 16 * surgeRatio, rgb: '34, 211, 238', lw: 5.5, wobbleAmp: 7 },
-      ];
-      for (let r = 0; r < ringSpecs.length; r++) {
-        const spec = ringSpecs[r];
-        const radius = Math.max(8, baseR + spec.dr);
-        const wobble = spec.wobbleAmp * surgeRatio;
-        ctx.strokeStyle = `rgba(${spec.rgb}, ${(0.72 * envelope).toFixed(3)})`;
-        ctx.lineWidth = Math.max(1.2, spec.lw * surgeRatio);
-        ctx.beginPath();
-        const segs = 48;
-        for (let s = 0; s <= segs; s++) {
-          const a = (s / segs) * Math.PI * 2;
-          const dr = Math.sin(a * 7 + progress * 24 + r * 1.8) * wobble;
-          const px = ox + Math.cos(a) * (radius + dr);
-          const py = oy + Math.sin(a) * (radius + dr);
-          if (s === 0) ctx.moveTo(px, py);
-          else ctx.lineTo(px, py);
-        }
-        ctx.closePath();
-        ctx.stroke();
-      }
-
-      ctx.restore();
-    }
-
-    // 3. Sustained vibrant chromatic edge aura while Sobrecarga remains active
-    if (p.overdriveTimer > 0 && this.state === 'PLAYING') {
-      const remainRatio = Math.min(1, p.overdriveTimer / 0.8);
-      const pulse = 0.68 + 0.32 * Math.sin(this.ambientTime * 9.5);
-      const hue = (this.ambientTime * 110) % 360;
-      const hueAlt = (hue + 145) % 360;
-      const rInner = Math.min(w, h) * 0.38;
-      const rOuter = maxDiag * 0.56;
-
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      const auraGrad = ctx.createRadialGradient(w * 0.5, h * 0.5, rInner, w * 0.5, h * 0.5, rOuter);
-      auraGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
-      auraGrad.addColorStop(0.7, `hsla(${hue.toFixed(0)}, 95%, 60%, ${(0.12 * pulse * remainRatio).toFixed(3)})`);
-      auraGrad.addColorStop(1, `hsla(${hueAlt.toFixed(0)}, 95%, 62%, ${(0.28 * pulse * remainRatio).toFixed(3)})`);
-      ctx.fillStyle = auraGrad;
-      ctx.fillRect(0, 0, w, h);
-      ctx.restore();
     }
   }
 
@@ -4152,22 +3904,12 @@ export class SolarisEngine {
     }
 
     if (!dying && p.overdriveTimer > 0) {
-      const pulse = 1 + Math.sin(this.ambientTime * 16) * 0.09;
-      const hue = (this.ambientTime * 180) % 360;
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.strokeStyle = `hsla(${hue.toFixed(0)}, 95%, 64%, 0.78)`;
-      ctx.lineWidth = 2.4;
+      const pulse = 1 + Math.sin(this.ambientTime * 12) * 0.06;
+      ctx.strokeStyle = 'rgba(255, 123, 102, 0.65)';
+      ctx.lineWidth = 1.8;
       ctx.beginPath();
-      ctx.arc(0, 0, 27 * pulse, 0, Math.PI * 2);
+      ctx.arc(0, 0, 26 * pulse, 0, Math.PI * 2);
       ctx.stroke();
-
-      ctx.strokeStyle = `hsla(${((hue + 140) % 360).toFixed(0)}, 95%, 64%, 0.5)`;
-      ctx.lineWidth = 1.6;
-      ctx.beginPath();
-      ctx.arc(0, 0, 32 * (2 - pulse), 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.restore();
     }
 
     if (!dying && this.repairAnimTimer > 0) {

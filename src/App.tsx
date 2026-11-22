@@ -75,7 +75,6 @@ const INITIAL_HUD: HudSnapshot = {
   damagePulseId: 0,
   repairAnimRatio: 0,
   repairPulseId: 0,
-  overdrivePulseId: 0,
 };
 
 function detectTouchDevice(): boolean {
@@ -125,7 +124,6 @@ export default function App() {
   const [disableFutureTutorial, setDisableFutureTutorial] = useState(false);
   const [tutorialEnabled, setTutorialEnabled] = useState<boolean>(() => !loadTutorialDisabled());
   const tutorialDisabledRef = useRef<boolean>(loadTutorialDisabled());
-  const [activeOverdriveSurgeId, setActiveOverdriveSurgeId] = useState(0);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -438,16 +436,6 @@ export default function App() {
     };
   }, [warningActive, muted, hud.hp]);
 
-  // Trigger transient fullscreen CSS chromatic saturation/prism surge upon Overdrive activation
-  useEffect(() => {
-    if (hud.overdrivePulseId <= 0) return;
-    setActiveOverdriveSurgeId(hud.overdrivePulseId);
-    const timeoutId = window.setTimeout(() => {
-      setActiveOverdriveSurgeId(0);
-    }, 1300);
-    return () => window.clearTimeout(timeoutId);
-  }, [hud.overdrivePulseId]);
-
   const dashReady = hud.dashReadyRatio >= 0.99;
   const dashRadius = 29;
   const dashCircumference = 2 * Math.PI * dashRadius;
@@ -572,34 +560,6 @@ export default function App() {
         />
       )}
 
-      {/* FULLSCREEN OVERDRIVE DISTORTION & VIBRANT PRISMATIC SURGE */}
-      {!isTitle && !isCutscene && activeOverdriveSurgeId > 0 && (
-        <div
-          key={`overdrive-surge-${activeOverdriveSurgeId}`}
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-0 z-[8] overflow-hidden"
-        >
-          <div
-            className="animate-overdrive-surge absolute inset-0"
-            style={{
-              background:
-                'radial-gradient(circle at 50% 50%, rgba(255,255,255,0.18) 0%, rgba(255,46,147,0.22) 32%, rgba(34,211,238,0.22) 64%, rgba(168,85,247,0.3) 100%)',
-              mixBlendMode: 'screen',
-            }}
-          />
-          <div
-            className="animate-overdrive-prism-ring absolute left-1/2 top-1/2 h-[120vmax] w-[120vmax] -translate-x-1/2 -translate-y-1/2 rounded-full opacity-90"
-            style={{
-              background:
-                'conic-gradient(from 0deg, rgba(255,46,147,0.5), rgba(250,204,21,0.45), rgba(34,211,238,0.5), rgba(168,85,247,0.5), rgba(52,211,153,0.45), rgba(255,46,147,0.5))',
-              maskImage: 'radial-gradient(circle, transparent 42%, black 52%, transparent 64%)',
-              WebkitMaskImage: 'radial-gradient(circle, transparent 42%, black 52%, transparent 64%)',
-              mixBlendMode: 'screen',
-            }}
-          />
-        </div>
-      )}
-
       {/* ACTIVE GAMEPLAY HUD (Low-occlusion, pointer-events-none, landscape safe-area insets) */}
       {!isTitle && !isCutscene && (
         <div className="pointer-events-none absolute inset-0 z-10 flex flex-col justify-between pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-[max(0.65rem,env(safe-area-inset-top))] pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-6">
@@ -641,9 +601,7 @@ export default function App() {
                 </span>
                 <span
                   className={`hidden sm:inline ${
-                    hud.overdriveActive
-                      ? 'bg-gradient-to-r from-[#FF2E93] via-[#FACC15] to-[#22D3EE] bg-clip-text text-transparent font-semibold'
-                      : 'text-[#F4EFE6]/65'
+                    hud.overdriveActive ? 'text-[#FF7B66] font-semibold' : 'text-[#F4EFE6]/65'
                   }`}
                 >
                   {hud.overdriveActive ? 'Sobrecarga Ativa' : 'Sobrecarga'}
@@ -651,14 +609,12 @@ export default function App() {
               </div>
               <div
                 className={`h-1.5 w-24 sm:w-44 overflow-hidden rounded-xs bg-[#132035] border ${
-                  hud.overdriveActive ? 'border-[#22D3EE]/70' : 'border-[#E8B84B]/25'
+                  hud.overdriveActive ? 'border-[#FF7B66]/70' : 'border-[#E8B84B]/25'
                 }`}
               >
                 <div
                   className={`h-full origin-left transition-transform duration-100 ${
-                    hud.overdriveActive
-                      ? 'bg-gradient-to-r from-[#FF2E93] via-[#FACC15] to-[#22D3EE]'
-                      : 'bg-[#E8B84B]'
+                    hud.overdriveActive ? 'bg-[#FF7B66]' : 'bg-[#E8B84B]'
                   }`}
                   style={{ transform: `scaleX(${Math.max(0, Math.min(1, hud.overdriveRatio))})` }}
                 />
