@@ -43,7 +43,13 @@ jobs:
           EOF
           npx cap add android
           npx cap sync
-
+      - name: Aplicar ícone do jogo no Android
+        run: |
+          sudo apt-get update && sudo apt-get install -y imagemagick
+          mkdir -p assets
+          convert favicon.ico -thumbnail 1024x1024 -alpha on -background none -flatten assets/logo.png
+          npm install -D @capacitor/assets --legacy-peer-deps
+          npx capacitor-assets generate --android
       - name: Configurar Tela Cheia Real e Rotação Livre
         run: |
           sed -i 's/android:screenOrientation="[^"]*"/android:screenOrientation="fullSensor"/g' android/app/src/main/AndroidManifest.xml
