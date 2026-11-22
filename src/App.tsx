@@ -6,7 +6,9 @@ import {
   Pause,
   Play,
   RotateCcw,
+  RotateCw,
   Settings,
+  Smartphone,
   Zap,
 } from 'lucide-react';
 import { CockpitDamageOverlay } from './components/CockpitDamageOverlay';
@@ -73,6 +75,7 @@ const INITIAL_HUD: HudSnapshot = {
   damagePulseId: 0,
   repairAnimRatio: 0,
   repairPulseId: 0,
+  overdrivePulseId: 0,
 };
 
 function detectTouchDevice(): boolean {
@@ -93,6 +96,14 @@ function detectPreviewIframe(): boolean {
   }
 }
 
+function checkNeedsLandscape(): boolean {
+  if (typeof window === 'undefined') return false;
+  return (
+    window.innerHeight > window.innerWidth &&
+    (detectTouchDevice() || window.innerWidth < 900)
+  );
+}
+
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<SolarisEngine | null>(null);
@@ -104,13 +115,17 @@ export default function App() {
   const [gameplaySettings, setGameplaySettings] = useState<GameplaySettings>(loadGameplaySettings);
   const [showSettings, setShowSettings] = useState(false);
   const settingsAutoPausedRef = useRef(false);
+  const portraitAutoPausedRef = useRef(false);
   const [isTouch, setIsTouch] = useState<boolean>(detectTouchDevice);
+  const [needsLandscape, setNeedsLandscape] = useState<boolean>(checkNeedsLandscape);
   const [isPreview] = useState<boolean>(detectPreviewIframe);
   const [showLore, setShowLore] = useState(false);
   const [loreTab, setLoreTab] = useState<'mission' | 'sentinels'>('mission');
   const [showTutorial, setShowTutorial] = useState(false);
   const [disableFutureTutorial, setDisableFutureTutorial] = useState(false);
+  const [tutorialEnabled, setTutorialEnabled] = useState<boolean>(() => !loadTutorialDisabled());
   const tutorialDisabledRef = useRef<boolean>(loadTutorialDisabled());
+  const [activeOverdriveSurgeId, setActiveOverdriveSurgeId] = useState(0);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -141,11 +156,21 @@ export default function App() {
     engineRef.current = engine;
     engine.startLoop();
 
-    const onFirstTouch = () => setIsTouch(true);
+    const onFirstTouch = () => {
+      setIsTouch(true);
+      setNeedsLandscape(checkNeedsLandscape());
+    };
+    const onOrientationOrResize = () => {
+      setNeedsLandscape(checkNeedsLandscape());
+    };
     window.addEventListener('touchstart', onFirstTouch, { passive: true, once: true });
+    window.addEventListener('resize', onOrientationOrResize);
+    window.addEventListener('orientationchange', onOrientationOrResize);
 
     return () => {
       window.removeEventListener('touchstart', onFirstTouch);
+      window.removeEventListener('resize', onOrientationOrResize);
+      window.removeEventListener('orientationchange', onOrientationOrResize);
       audio.stopPauseHum();
       audio.stopWarningVoice();
       engine.destroy();
@@ -159,8 +184,12 @@ export default function App() {
       if (rootEl.requestFullscreen && !document.fullscreenElement) {
         await rootEl.requestFullscreen().catch(() => {});
       }
+      const orientation = screen.orientation as { lock?: (mode: string) => Promise<void> } | undefined;
+      if (orientation?.lock) {
+        await orientation.lock('landscape').catch(() => {});
+      }
     } catch {
-      // Fullscreen not supported
+      // Fullscreen / orientation lock not supported
     }
   }, []);
 
@@ -215,11 +244,28 @@ export default function App() {
     const nextGameplay = { ...DEFAULT_GAMEPLAY_SETTINGS };
     setGameplaySettings(nextGameplay);
     engineRef.current?.setGameplaySettings(nextGameplay);
+    tutorialDisabledRef.current = false;
+    setTutorialEnabled(true);
     try {
       localStorage.setItem(GAMEPLAY_SETTINGS_KEY, JSON.stringify(nextGameplay));
+      localStorage.setItem(TUTORIAL_DISABLED_KEY, 'false');
     } catch {
       // Ignore storage failures
     }
+  }, []);
+
+  const handleToggleTutorialEnabled = useCallback(() => {
+    audioRef.current?.playUiClick('tab');
+    setTutorialEnabled((prev) => {
+      const next = !prev;
+      tutorialDisabledRef.current = !next;
+      try {
+        localStorage.setItem(TUTORIAL_DISABLED_KEY, next ? 'false' : 'true');
+      } catch {
+        // Ignore storage failures
+      }
+      return next;
+    });
   }, []);
 
   const handleOpenSettings = useCallback(() => {
@@ -312,6 +358,7 @@ export default function App() {
     audioRef.current?.playUiClick('primary');
     if (disableFutureTutorial) {
       tutorialDisabledRef.current = true;
+      setTutorialEnabled(false);
       try {
         localStorage.setItem(TUTORIAL_DISABLED_KEY, 'true');
       } catch {
@@ -336,7 +383,7 @@ export default function App() {
     const audio = audioRef.current;
     if (!audio) return;
 
-    const effectivelyPaused = isPaused && !showTutorial;
+    const effectivelyPaused = isPaused && !showTutorial && !needsLandscape;
     if (effectivelyPaused !== prevPausedRef.current) {
       prevPausedRef.current = effectivelyPaused;
       if (!muted) {
@@ -349,7 +396,24 @@ export default function App() {
     } else {
       audio.stopPauseHum();
     }
-  }, [isPaused, showTutorial, muted]);
+  }, [isPaused, showTutorial, needsLandscape, muted]);
+
+  // Auto-pause active combat when rotated to portrait and resume when turned back to horizontal
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    if (needsLandscape) {
+      if (engine.getState() === 'PLAYING') {
+        portraitAutoPausedRef.current = true;
+        engine.togglePause();
+      }
+    } else if (portraitAutoPausedRef.current) {
+      portraitAutoPausedRef.current = false;
+      if (engine.getState() === 'PAUSED' && !showSettings && !showTutorial) {
+        engine.togglePause();
+      }
+    }
+  }, [needsLandscape, showSettings, showTutorial]);
 
   // Periodic deep male ship-computer "Warning" voice while HP <= 2 until death, repair, pause, or mute
   useEffect(() => {
@@ -373,6 +437,16 @@ export default function App() {
       audioRef.current?.stopWarningVoice();
     };
   }, [warningActive, muted, hud.hp]);
+
+  // Trigger transient fullscreen CSS chromatic saturation/prism surge upon Overdrive activation
+  useEffect(() => {
+    if (hud.overdrivePulseId <= 0) return;
+    setActiveOverdriveSurgeId(hud.overdrivePulseId);
+    const timeoutId = window.setTimeout(() => {
+      setActiveOverdriveSurgeId(0);
+    }, 1300);
+    return () => window.clearTimeout(timeoutId);
+  }, [hud.overdrivePulseId]);
 
   const dashReady = hud.dashReadyRatio >= 0.99;
   const dashRadius = 29;
@@ -498,6 +572,34 @@ export default function App() {
         />
       )}
 
+      {/* FULLSCREEN OVERDRIVE DISTORTION & VIBRANT PRISMATIC SURGE */}
+      {!isTitle && !isCutscene && activeOverdriveSurgeId > 0 && (
+        <div
+          key={`overdrive-surge-${activeOverdriveSurgeId}`}
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 z-[8] overflow-hidden"
+        >
+          <div
+            className="animate-overdrive-surge absolute inset-0"
+            style={{
+              background:
+                'radial-gradient(circle at 50% 50%, rgba(255,255,255,0.18) 0%, rgba(255,46,147,0.22) 32%, rgba(34,211,238,0.22) 64%, rgba(168,85,247,0.3) 100%)',
+              mixBlendMode: 'screen',
+            }}
+          />
+          <div
+            className="animate-overdrive-prism-ring absolute left-1/2 top-1/2 h-[120vmax] w-[120vmax] -translate-x-1/2 -translate-y-1/2 rounded-full opacity-90"
+            style={{
+              background:
+                'conic-gradient(from 0deg, rgba(255,46,147,0.5), rgba(250,204,21,0.45), rgba(34,211,238,0.5), rgba(168,85,247,0.5), rgba(52,211,153,0.45), rgba(255,46,147,0.5))',
+              maskImage: 'radial-gradient(circle, transparent 42%, black 52%, transparent 64%)',
+              WebkitMaskImage: 'radial-gradient(circle, transparent 42%, black 52%, transparent 64%)',
+              mixBlendMode: 'screen',
+            }}
+          />
+        </div>
+      )}
+
       {/* ACTIVE GAMEPLAY HUD (Low-occlusion, pointer-events-none, landscape safe-area insets) */}
       {!isTitle && !isCutscene && (
         <div className="pointer-events-none absolute inset-0 z-10 flex flex-col justify-between pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-[max(0.65rem,env(safe-area-inset-top))] pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-6">
@@ -539,16 +641,24 @@ export default function App() {
                 </span>
                 <span
                   className={`hidden sm:inline ${
-                    hud.overdriveActive ? 'text-[#FF7B66] font-semibold' : 'text-[#F4EFE6]/65'
+                    hud.overdriveActive
+                      ? 'bg-gradient-to-r from-[#FF2E93] via-[#FACC15] to-[#22D3EE] bg-clip-text text-transparent font-semibold'
+                      : 'text-[#F4EFE6]/65'
                   }`}
                 >
                   {hud.overdriveActive ? 'Sobrecarga Ativa' : 'Sobrecarga'}
                 </span>
               </div>
-              <div className="h-1.5 w-24 sm:w-44 overflow-hidden rounded-xs bg-[#132035] border border-[#E8B84B]/25">
+              <div
+                className={`h-1.5 w-24 sm:w-44 overflow-hidden rounded-xs bg-[#132035] border ${
+                  hud.overdriveActive ? 'border-[#22D3EE]/70' : 'border-[#E8B84B]/25'
+                }`}
+              >
                 <div
                   className={`h-full origin-left transition-transform duration-100 ${
-                    hud.overdriveActive ? 'bg-[#FF7B66]' : 'bg-[#E8B84B]'
+                    hud.overdriveActive
+                      ? 'bg-gradient-to-r from-[#FF2E93] via-[#FACC15] to-[#22D3EE]'
+                      : 'bg-[#E8B84B]'
                   }`}
                   style={{ transform: `scaleX(${Math.max(0, Math.min(1, hud.overdriveRatio))})` }}
                 />
@@ -868,7 +978,7 @@ export default function App() {
                     key={entry.id}
                     className="flex gap-3 sm:gap-4 border-b border-[#E8B84B]/12 pb-3 sm:pb-4 last:border-b-0 last:pb-0"
                   >
-                    <div className="h-14 w-14 sm:h-20 sm:w-20 shrink-0 overflow-hidden rounded-md border border-[#E8B84B]/25 bg-[#0B1320]">
+                    <div className="h-14 w-14 sm:h-20 sm:w-20 shrink-0 overflow-hidden rounded-md border border-[#E8B84B]/25 bg-black">
                       <img
                         src={entry.imageSrc}
                         alt={entry.title}
@@ -980,15 +1090,67 @@ export default function App() {
         muted={muted}
         audioSettings={audioSettings}
         gameplaySettings={gameplaySettings}
+        tutorialEnabled={tutorialEnabled}
         onToggleMute={handleToggleMute}
         onAudioChange={handleAudioSettingsChange}
         onGameplayChange={handleGameplaySettingsChange}
+        onToggleTutorialEnabled={handleToggleTutorialEnabled}
         onTestSfx={handleTestSfx}
         onTestVoice={handleTestVoice}
         onResetDefaults={handleResetSettings}
         onClose={handleCloseSettings}
         onHover={playHover}
       />
+
+      {/* ROTATE TO LANDSCAPE PROMPT */}
+      {needsLandscape && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="rotate-landscape-title"
+          className="animate-modal-backdrop absolute inset-0 z-50 flex flex-col items-center justify-center bg-[#0B1320]/96 px-6 text-center backdrop-blur-sm"
+        >
+          <div className="relative flex h-24 w-24 items-center justify-center">
+            <div
+              aria-hidden="true"
+              className="absolute inset-0 rounded-full border border-[#E8B84B]/30"
+            />
+            <div
+              aria-hidden="true"
+              className="absolute inset-2.5 rounded-full border border-dashed border-[#E8B84B]/20"
+            />
+            <Smartphone className="animate-rotate-landscape h-10 w-10 text-[#E8B84B]" />
+            <RotateCw
+              aria-hidden="true"
+              className="absolute -top-1 -right-1 h-5 w-5 text-[#F4EFE6]/75"
+            />
+          </div>
+
+          <h2
+            id="rotate-landscape-title"
+            className="mt-6 font-display text-xl font-semibold tracking-[0.14em] text-[#F4EFE6]"
+          >
+            VIRE PARA A HORIZONTAL
+          </h2>
+          <p className="mt-2.5 max-w-xs text-sm leading-relaxed text-[#F4EFE6]/72">
+            Gire o aparelho para a posição horizontal para pilotar a Solaris com visão ampla da arena.
+          </p>
+
+          {typeof document !== 'undefined' && Boolean(document.documentElement.requestFullscreen) && (
+            <button
+              type="button"
+              onClick={() => {
+                audioRef.current?.playUiClick('primary');
+                void tryEnterFullscreen();
+              }}
+              className="mt-6 inline-flex h-11 items-center justify-center gap-2 rounded-md border border-[#E8B84B]/45 bg-[#132035] px-5 text-xs font-semibold tracking-wide text-[#E8B84B] transition-colors hover:border-[#E8B84B] hover:bg-[#182942] cursor-pointer"
+            >
+              <Maximize2 className="h-4 w-4" />
+              <span>Ativar Tela Cheia na Horizontal</span>
+            </button>
+          )}
+        </div>
+      )}
       </div>
     </div>
   );

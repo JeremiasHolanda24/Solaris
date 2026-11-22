@@ -28,7 +28,7 @@ const SPRITE_URLS = {
   SCOUT: '/src/assets/images/solaris_enemy_scout_1795181299986.jpg',
   STRIKER: '/src/assets/images/solaris_enemy_striker_1795181300757.jpg',
   BASTION: '/src/assets/images/solaris_enemy_bastion_1795181300327.jpg',
-  SPLITTER: '/src/assets/images/solaris_enemy_splitter_1795181300379.jpg',
+  SPLITTER: '/src/assets/images/solaris_enemy_splitter.png',
 } as const;
 
 type SpritePair = {
@@ -89,6 +89,7 @@ export class SolarisEngine {
   private waveBanner: string | null = null;
   private waveBannerTimer = 0;
   private kills = 0;
+  private arenaZoom = 1;
 
   // Juice
   private hitstopTimer = 0;
@@ -101,6 +102,9 @@ export class SolarisEngine {
   private readonly repairAnimDuration = 1.4;
   private repairPulseId = 0;
   private repairMoteAccum = 0;
+  private overdriveSurgeTimer = 0;
+  private readonly overdriveSurgeDuration = 1.35;
+  private overdrivePulseId = 0;
   private ambientTime = 0;
 
   // Dramatic Player Destruction Sequence
@@ -237,7 +241,7 @@ export class SolarisEngine {
     { active: false, x: 0, y: 0, vx: 0, vy: 0, tx: 0, ty: 0 },
   ];
 
-  // Randomized per-match Combat Zone Scenery (guaranteed separated positions)
+  // Randomized per-match Combat Zone Scenery (guaranteed dispersed & non-overlapping)
   private combatNebula: {
     normX: number;
     normY: number;
@@ -266,31 +270,58 @@ export class SolarisEngine {
     lobes: [],
   };
 
-  private combatPlanet: {
-    normX: number;
-    normY: number;
-    scale: number;
-    lightAngle: number;
-    litHex: string;
-    midHex: string;
-    darkHex: string;
-    rimRgb: string;
-    bandRgb: string;
-    hasRings: boolean;
-    ringTilt: number;
-  } = {
-    normX: 0.78,
-    normY: 0.72,
-    scale: 0.1,
-    lightAngle: -0.6,
-    litHex: '#FB923C',
-    midHex: '#C2410C',
-    darkHex: '#271007',
-    rimRgb: '253, 186, 116',
-    bandRgb: '255, 237, 213',
-    hasRings: true,
-    ringTilt: -0.32,
-  };
+  private sceneryBodies: Array<
+    | {
+        kind: 'planet';
+        normX: number;
+        normY: number;
+        scale: number;
+        clearance: number;
+        lightAngle: number;
+        litHex: string;
+        midHex: string;
+        darkHex: string;
+        rimRgb: string;
+        bandRgb: string;
+        hasRings: boolean;
+        ringTilt: number;
+      }
+    | {
+        kind: 'moon';
+        normX: number;
+        normY: number;
+        scale: number;
+        clearance: number;
+        lightAngle: number;
+        litHex: string;
+        midHex: string;
+        darkHex: string;
+        rimRgb: string;
+        craters: Array<{ dx: number; dy: number; r: number }>;
+      }
+    | {
+        kind: 'star_body';
+        normX: number;
+        normY: number;
+        scale: number;
+        clearance: number;
+        coreHex: string;
+        coronaRgb: string;
+        rayAngle: number;
+        pulseOffset: number;
+      }
+    | {
+        kind: 'black_hole';
+        normX: number;
+        normY: number;
+        scale: number;
+        clearance: number;
+        diskTilt: number;
+        accretionRgb: string;
+        hotRgb: string;
+        spinDir: 1 | -1;
+      }
+  > = [];
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -461,163 +492,169 @@ export class SolarisEngine {
       const imgData = nctx.getImageData(0, 0, outW, outH);
       const data = imgData.data;
 
-      // Auto-detect background color from top-left corner (supports pure black or pure white backdrops)
-      const bgR = data[0];
-      const bgG = data[1];
-      const bgB = data[2];
-      const isLightBg = bgR > 200 && bgG > 200 && bgB > 200;
-      const threshold = key === 'PLAYER_FRONT' ? 12 : isLightBg ? 46 : 30;
+      // Preserve pre-cut RGBA PNG transparency (e.g. cleaned Núcleo sprite) without eating dark outlines
+      const hasNativeAlpha =
+        data[3] < 245 || data[(outW - 1) * 4 + 3] < 245 || data[(outW * (outH - 1)) * 4 + 3] < 245;
 
-      const totalPixels = outW * outH;
-      const visited = new Uint8Array(totalPixels);
-      const queue = new Int32Array(totalPixels);
-      let head = 0;
-      let tail = 0;
+      if (!hasNativeAlpha) {
+        // Auto-detect background color from top-left corner (supports pure black or pure white backdrops)
+        const bgR = data[0];
+        const bgG = data[1];
+        const bgB = data[2];
+        const isLightBg = bgR > 200 && bgG > 200 && bgB > 200;
+        const threshold = key === 'PLAYER_FRONT' ? 12 : isLightBg ? 46 : 30;
 
-      const isBg = (idx: number): boolean => {
-        const o = idx * 4;
-        const dr = Math.abs(data[o] - bgR);
-        const dg = Math.abs(data[o + 1] - bgG);
-        const db = Math.abs(data[o + 2] - bgB);
-        return dr < threshold && dg < threshold && db < threshold;
-      };
+        const totalPixels = outW * outH;
+        const visited = new Uint8Array(totalPixels);
+        const queue = new Int32Array(totalPixels);
+        let head = 0;
+        let tail = 0;
 
-      const enqueue = (x: number, y: number) => {
-        if (x < 0 || x >= outW || y < 0 || y >= outH) return;
-        const idx = y * outW + x;
-        if (visited[idx]) return;
-        if (!isBg(idx)) return;
-        visited[idx] = 1;
-        queue[tail++] = idx;
-      };
-
-      for (let x = 0; x < outW; x++) {
-        enqueue(x, 0);
-        enqueue(x, outH - 1);
-      }
-      for (let y = 0; y < outH; y++) {
-        enqueue(0, y);
-        // For PLAYER_FRONT, avoid seeding inside the dark lower-right wing intake cavity on the right edge
-        if (key === 'PLAYER_FRONT' && y >= outH * 0.53 && y <= outH * 0.78) {
-          continue;
-        }
-        enqueue(outW - 1, y);
-      }
-
-      while (head < tail) {
-        const idx = queue[head++];
-        data[idx * 4 + 3] = 0;
-        const x = idx % outW;
-        const y = (idx - x) / outW;
-        enqueue(x + 1, y);
-        enqueue(x - 1, y);
-        enqueue(x, y + 1);
-        enqueue(x, y - 1);
-      }
-
-      // For PLAYER_FRONT, peel & un-premultiply the dark exterior black-to-amber bloom
-      // along the sunlit outer rim (nose tip to wings) without entering interior dark intakes.
-      let haloProcessed: Uint8Array | null = null;
-      if (key === 'PLAYER_FRONT') {
-        haloProcessed = new Uint8Array(totalPixels);
-        const haloVisited = new Uint8Array(totalPixels);
-        const hQueue = new Int32Array(totalPixels);
-        let hHead = 0;
-        let hTail = 0;
-        const maxHaloX = Math.floor(outW * 0.62);
-
-        for (let y = 1; y < outH - 1; y++) {
-          for (let x = 1; x < maxHaloX; x++) {
-            const idx = y * outW + x;
-            if (visited[idx]) continue;
-            if (visited[idx - 1] || visited[idx + 1] || visited[idx - outW] || visited[idx + outW]) {
-              haloVisited[idx] = 1;
-              hQueue[hTail++] = idx;
-            }
-          }
-        }
-
-        while (hHead < hTail) {
-          const idx = hQueue[hHead++];
+        const isBg = (idx: number): boolean => {
           const o = idx * 4;
-          const r = data[o];
-          const g = data[o + 1];
-          const b = data[o + 2];
-          const maxC = r > g ? (r > b ? r : b) : g > b ? g : b;
-          const isDarkFringe = maxC < 24 && b < 14;
-          const isWarmBloom = r < 155 && b <= 21 && r >= g * 1.48 && r - b >= 8;
-          if (!isDarkFringe && !isWarmBloom) continue;
+          const dr = Math.abs(data[o] - bgR);
+          const dg = Math.abs(data[o + 1] - bgG);
+          const db = Math.abs(data[o + 2] - bgB);
+          return dr < threshold && dg < threshold && db < threshold;
+        };
 
-          if (r <= 44) {
-            data[o + 3] = 0;
-            visited[idx] = 1;
-          } else {
-            const t = (r - 44) / (155 - 44);
-            const alphaF = t * t * 0.88;
-            data[o + 3] = Math.round(alphaF * 255);
-            if (alphaF > 0.02) {
-              const denom = Math.max(0.32, alphaF);
-              data[o] = Math.min(255, Math.round(r / denom));
-              data[o + 1] = Math.min(255, Math.round(g / denom));
-              data[o + 2] = Math.min(255, Math.round(b / denom));
-            }
+        const enqueue = (x: number, y: number) => {
+          if (x < 0 || x >= outW || y < 0 || y >= outH) return;
+          const idx = y * outW + x;
+          if (visited[idx]) return;
+          if (!isBg(idx)) return;
+          visited[idx] = 1;
+          queue[tail++] = idx;
+        };
+
+        for (let x = 0; x < outW; x++) {
+          enqueue(x, 0);
+          enqueue(x, outH - 1);
+        }
+        for (let y = 0; y < outH; y++) {
+          enqueue(0, y);
+          // For PLAYER_FRONT, avoid seeding inside the dark lower-right wing intake cavity on the right edge
+          if (key === 'PLAYER_FRONT' && y >= outH * 0.53 && y <= outH * 0.78) {
+            continue;
           }
-          haloProcessed[idx] = 1;
+          enqueue(outW - 1, y);
+        }
 
+        while (head < tail) {
+          const idx = queue[head++];
+          data[idx * 4 + 3] = 0;
           const x = idx % outW;
           const y = (idx - x) / outW;
-          if (x + 1 < maxHaloX) {
-            const n = idx + 1;
-            if (!visited[n] && !haloVisited[n]) {
-              haloVisited[n] = 1;
-              hQueue[hTail++] = n;
-            }
-          }
-          if (x - 1 >= 0) {
-            const n = idx - 1;
-            if (!visited[n] && !haloVisited[n]) {
-              haloVisited[n] = 1;
-              hQueue[hTail++] = n;
-            }
-          }
-          if (y + 1 < outH) {
-            const n = idx + outW;
-            if (!visited[n] && !haloVisited[n]) {
-              haloVisited[n] = 1;
-              hQueue[hTail++] = n;
-            }
-          }
-          if (y - 1 >= 0) {
-            const n = idx - outW;
-            if (!visited[n] && !haloVisited[n]) {
-              haloVisited[n] = 1;
-              hQueue[hTail++] = n;
-            }
-          }
+          enqueue(x + 1, y);
+          enqueue(x - 1, y);
+          enqueue(x, y + 1);
+          enqueue(x, y - 1);
         }
-      }
 
-      // Soften 1px anti-alias fringe touching transparent exterior
-      for (let y = 1; y < outH - 1; y++) {
-        for (let x = 1; x < outW - 1; x++) {
-          const idx = y * outW + x;
-          if (visited[idx] || (haloProcessed && haloProcessed[idx])) continue;
-          if (key === 'PLAYER_FRONT' && x >= outW * 0.72 && y >= outH * 0.5) continue;
-          const touchesBg =
-            visited[idx - 1] || visited[idx + 1] || visited[idx - outW] || visited[idx + outW];
-          if (touchesBg) {
+        // For PLAYER_FRONT, peel & un-premultiply the dark exterior black-to-amber bloom
+        // along the sunlit outer rim (nose tip to wings) without entering interior dark intakes.
+        let haloProcessed: Uint8Array | null = null;
+        if (key === 'PLAYER_FRONT') {
+          haloProcessed = new Uint8Array(totalPixels);
+          const haloVisited = new Uint8Array(totalPixels);
+          const hQueue = new Int32Array(totalPixels);
+          let hHead = 0;
+          let hTail = 0;
+          const maxHaloX = Math.floor(outW * 0.62);
+
+          for (let y = 1; y < outH - 1; y++) {
+            for (let x = 1; x < maxHaloX; x++) {
+              const idx = y * outW + x;
+              if (visited[idx]) continue;
+              if (visited[idx - 1] || visited[idx + 1] || visited[idx - outW] || visited[idx + outW]) {
+                haloVisited[idx] = 1;
+                hQueue[hTail++] = idx;
+              }
+            }
+          }
+
+          while (hHead < hTail) {
+            const idx = hQueue[hHead++];
             const o = idx * 4;
-            const dist =
-              (Math.abs(data[o] - bgR) + Math.abs(data[o + 1] - bgG) + Math.abs(data[o + 2] - bgB)) /
-              3;
-            if (dist < threshold + 28) {
-              data[o + 3] = Math.round(Math.min(255, (dist / (threshold + 28)) * 210));
+            const r = data[o];
+            const g = data[o + 1];
+            const b = data[o + 2];
+            const maxC = r > g ? (r > b ? r : b) : g > b ? g : b;
+            const isDarkFringe = maxC < 24 && b < 14;
+            const isWarmBloom = r < 155 && b <= 21 && r >= g * 1.48 && r - b >= 8;
+            if (!isDarkFringe && !isWarmBloom) continue;
+
+            if (r <= 44) {
+              data[o + 3] = 0;
+              visited[idx] = 1;
+            } else {
+              const t = (r - 44) / (155 - 44);
+              const alphaF = t * t * 0.88;
+              data[o + 3] = Math.round(alphaF * 255);
+              if (alphaF > 0.02) {
+                const denom = Math.max(0.32, alphaF);
+                data[o] = Math.min(255, Math.round(r / denom));
+                data[o + 1] = Math.min(255, Math.round(g / denom));
+                data[o + 2] = Math.min(255, Math.round(b / denom));
+              }
+            }
+            haloProcessed[idx] = 1;
+
+            const x = idx % outW;
+            const y = (idx - x) / outW;
+            if (x + 1 < maxHaloX) {
+              const n = idx + 1;
+              if (!visited[n] && !haloVisited[n]) {
+                haloVisited[n] = 1;
+                hQueue[hTail++] = n;
+              }
+            }
+            if (x - 1 >= 0) {
+              const n = idx - 1;
+              if (!visited[n] && !haloVisited[n]) {
+                haloVisited[n] = 1;
+                hQueue[hTail++] = n;
+              }
+            }
+            if (y + 1 < outH) {
+              const n = idx + outW;
+              if (!visited[n] && !haloVisited[n]) {
+                haloVisited[n] = 1;
+                hQueue[hTail++] = n;
+              }
+            }
+            if (y - 1 >= 0) {
+              const n = idx - outW;
+              if (!visited[n] && !haloVisited[n]) {
+                haloVisited[n] = 1;
+                hQueue[hTail++] = n;
+              }
             }
           }
         }
-      }
 
-      nctx.putImageData(imgData, 0, 0);
+        // Soften 1px anti-alias fringe touching transparent exterior
+        for (let y = 1; y < outH - 1; y++) {
+          for (let x = 1; x < outW - 1; x++) {
+            const idx = y * outW + x;
+            if (visited[idx] || (haloProcessed && haloProcessed[idx])) continue;
+            if (key === 'PLAYER_FRONT' && x >= outW * 0.72 && y >= outH * 0.5) continue;
+            const touchesBg =
+              visited[idx - 1] || visited[idx + 1] || visited[idx - outW] || visited[idx + outW];
+            if (touchesBg) {
+              const o = idx * 4;
+              const dist =
+                (Math.abs(data[o] - bgR) + Math.abs(data[o + 1] - bgG) + Math.abs(data[o + 2] - bgB)) /
+                3;
+              if (dist < threshold + 28) {
+                data[o + 3] = Math.round(Math.min(255, (dist / (threshold + 28)) * 210));
+              }
+            }
+          }
+        }
+
+        nctx.putImageData(imgData, 0, 0);
+      }
 
       // Create cached ivory hit-flash silhouette
       const flash = document.createElement('canvas');
@@ -684,11 +721,13 @@ export class SolarisEngine {
     this.comboTimer = 0;
     this.wave = 1;
     this.kills = 0;
+    this.arenaZoom = 1;
     this.hitstopTimer = 0;
     this.shakeIntensity = 0;
     this.damageFlashTimer = 0;
     this.repairAnimTimer = 0;
     this.repairMoteAccum = 0;
+    this.overdriveSurgeTimer = 0;
 
     this.playerDying = false;
     this.playerDetonated = false;
@@ -774,34 +813,197 @@ export class SolarisEngine {
       { litHex: '#C084FC', midHex: '#5B21B6', darkHex: '#170B33', rimRgb: '221, 214, 254', bandRgb: '243, 232, 255' },
       { litHex: '#E8B84B', midHex: '#92400E', darkHex: '#241305', rimRgb: '253, 230, 138', bandRgb: '254, 243, 199' },
     ];
-    const plPal = planetPalettes[Math.floor(Math.random() * planetPalettes.length)];
+    const moonPalettes = [
+      { litHex: '#CBD5E1', midHex: '#64748B', darkHex: '#1E293B', rimRgb: '226, 232, 240' },
+      { litHex: '#E7D6BE', midHex: '#9C8364', darkHex: '#2B2219', rimRgb: '245, 232, 211' },
+      { litHex: '#BAE6FD', midHex: '#3B82F6', darkHex: '#0F1D3A', rimRgb: '186, 230, 253' },
+      { litHex: '#FCA5A5', midHex: '#9F3A3A', darkHex: '#2A1014', rimRgb: '254, 202, 202' },
+    ];
+    const starPalettes = [
+      { coreHex: '#FFF9E6', coronaRgb: '251, 191, 36' },
+      { coreHex: '#F0F9FF', coronaRgb: '56, 189, 248' },
+      { coreHex: '#FFF1F2', coronaRgb: '251, 113, 133' },
+      { coreHex: '#FEFCE8', coronaRgb: '244, 239, 230' },
+    ];
+    const blackHolePalettes = [
+      { accretionRgb: '245, 158, 11', hotRgb: '254, 243, 199' },
+      { accretionRgb: '192, 132, 252', hotRgb: '243, 232, 255' },
+      { accretionRgb: '56, 189, 248', hotRgb: '224, 242, 254' },
+    ];
 
-    // Guarantee Planet & Nebula NEVER occupy the same region of the combat zone
-    let plX = nebX < 0.5 ? 0.78 : 0.22;
-    let plY = nebY < 0.5 ? 0.76 : 0.24;
-    for (let attempt = 0; attempt < 48; attempt++) {
-      const candX = 0.14 + Math.random() * 0.72;
-      const candY = 0.16 + Math.random() * 0.68;
-      if (Math.hypot(candX - nebX, candY - nebY) >= 0.48) {
-        plX = candX;
-        plY = candY;
-        break;
+    // Aspect-safe non-overlapping placement across standard & Wave 10+ expanded space
+    const placed: Array<{ x: number; y: number; clearance: number }> = [];
+    const bodies: typeof this.sceneryBodies = [];
+
+    const isClear = (cx: number, cy: number, clearance: number, avoidNebulaCore = false): boolean => {
+      if (avoidNebulaCore && Math.hypot(cx - nebX, cy - nebY) < clearance + 0.24) {
+        return false;
       }
+      for (let i = 0; i < placed.length; i++) {
+        const o = placed[i];
+        // Check both landscape & square aspect distances so objects never touch on any screen ratio
+        const dMin = Math.hypot((cx - o.x) * 0.85, cy - o.y);
+        if (dMin < clearance + o.clearance + 0.065) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    const pickDispersedPos = (
+      clearance: number,
+      minX: number,
+      maxX: number,
+      minY: number,
+      maxY: number,
+      avoidNebulaCore: boolean
+    ): { x: number; y: number } | null => {
+      for (let attempt = 0; attempt < 96; attempt++) {
+        const cx = minX + Math.random() * (maxX - minX);
+        const cy = minY + Math.random() * (maxY - minY);
+        if (isClear(cx, cy, clearance, avoidNebulaCore)) {
+          return { x: cx, y: cy };
+        }
+      }
+      return null;
+    };
+
+    // 1. Place 1-2 Planets (avoiding Nebula core)
+    const planetCount = Math.random() < 0.55 ? 2 : 1;
+    const planetPositions: Array<{ x: number; y: number; clearance: number; scale: number }> = [];
+    for (let i = 0; i < planetCount; i++) {
+      const plPal = planetPalettes[Math.floor(Math.random() * planetPalettes.length)];
+      const scale = (i === 0 ? 0.066 : 0.05) + Math.random() * 0.045;
+      const hasRings = Math.random() < 0.56;
+      const clearance = scale * (hasRings ? 2.18 : 1.52);
+      const pos =
+        i === 0
+          ? pickDispersedPos(clearance, 0.12, 0.88, 0.14, 0.86, true)
+          : pickDispersedPos(clearance, -0.08, 1.08, -0.06, 1.06, true);
+      if (!pos) continue;
+
+      placed.push({ x: pos.x, y: pos.y, clearance });
+      planetPositions.push({ x: pos.x, y: pos.y, clearance, scale });
+      bodies.push({
+        kind: 'planet',
+        normX: pos.x,
+        normY: pos.y,
+        scale,
+        clearance,
+        lightAngle: Math.random() * Math.PI * 2,
+        litHex: plPal.litHex,
+        midHex: plPal.midHex,
+        darkHex: plPal.darkHex,
+        rimRgb: plPal.rimRgb,
+        bandRgb: plPal.bandRgb,
+        hasRings,
+        ringTilt: (Math.random() - 0.5) * 1.15,
+      });
     }
 
-    this.combatPlanet = {
-      normX: plX,
-      normY: plY,
-      scale: 0.068 + Math.random() * 0.075,
-      lightAngle: Math.random() * Math.PI * 2,
-      litHex: plPal.litHex,
-      midHex: plPal.midHex,
-      darkHex: plPal.darkHex,
-      rimRgb: plPal.rimRgb,
-      bandRgb: plPal.bandRgb,
-      hasRings: Math.random() < 0.58,
-      ringTilt: (Math.random() - 0.5) * 1.15,
-    };
+    // 2. Place 1-2 Black Holes (well separated from planets, nebula core & each other)
+    const bhCount = Math.random() < 0.45 ? 2 : 1;
+    for (let i = 0; i < bhCount; i++) {
+      const bhPal = blackHolePalettes[Math.floor(Math.random() * blackHolePalettes.length)];
+      const scale = 0.036 + Math.random() * 0.022;
+      const clearance = scale * 2.55;
+      const pos =
+        i === 0
+          ? pickDispersedPos(clearance, 0.08, 0.92, 0.1, 0.9, true)
+          : pickDispersedPos(clearance, -0.1, 1.1, -0.08, 1.08, true);
+      if (!pos) continue;
+      placed.push({ x: pos.x, y: pos.y, clearance });
+      bodies.push({
+        kind: 'black_hole',
+        normX: pos.x,
+        normY: pos.y,
+        scale,
+        clearance,
+        diskTilt: (Math.random() - 0.5) * 0.95,
+        accretionRgb: bhPal.accretionRgb,
+        hotRgb: bhPal.hotRgb,
+        spinDir: Math.random() < 0.5 ? 1 : -1,
+      });
+    }
+
+    // 3. Place 1-2 Luminous Stars (dispersed across arena & outer expanded space)
+    const starCount = 1 + (Math.random() < 0.65 ? 1 : 0);
+    for (let i = 0; i < starCount; i++) {
+      const stPal = starPalettes[Math.floor(Math.random() * starPalettes.length)];
+      const scale = 0.024 + Math.random() * 0.018;
+      const clearance = scale * 2.4;
+      const pos =
+        i === 0
+          ? pickDispersedPos(clearance, 0.06, 0.94, 0.08, 0.92, false)
+          : pickDispersedPos(clearance, -0.12, 1.12, -0.1, 1.1, false);
+      if (!pos) continue;
+      placed.push({ x: pos.x, y: pos.y, clearance });
+      bodies.push({
+        kind: 'star_body',
+        normX: pos.x,
+        normY: pos.y,
+        scale,
+        clearance,
+        coreHex: stPal.coreHex,
+        coronaRgb: stPal.coronaRgb,
+        rayAngle: Math.random() * Math.PI * 0.5,
+        pulseOffset: Math.random() * Math.PI * 2,
+      });
+    }
+
+    // 4. Place 2-3 Natural Satellites (moons — at least one orbiting near a planet without overlapping, others dispersed)
+    const moonCount = 2 + (Math.random() < 0.55 ? 1 : 0);
+    for (let i = 0; i < moonCount; i++) {
+      const mPal = moonPalettes[Math.floor(Math.random() * moonPalettes.length)];
+      const scale = 0.016 + Math.random() * 0.012;
+      const clearance = scale * 1.45;
+      let pos: { x: number; y: number } | null = null;
+
+      if (i === 0 && planetPositions.length > 0) {
+        const host = planetPositions[0];
+        const orbitDist = host.clearance + clearance + 0.09 + Math.random() * 0.06;
+        for (let aTry = 0; aTry < 32; aTry++) {
+          const ang = Math.random() * Math.PI * 2;
+          const cx = host.x + Math.cos(ang) * orbitDist;
+          const cy = host.y + Math.sin(ang) * orbitDist;
+          if (cx >= -0.08 && cx <= 1.08 && cy >= -0.06 && cy <= 1.06 && isClear(cx, cy, clearance, false)) {
+            pos = { x: cx, y: cy };
+            break;
+          }
+        }
+      }
+      if (!pos) {
+        pos = pickDispersedPos(clearance, -0.08, 1.08, -0.06, 1.06, false);
+      }
+      if (!pos) continue;
+
+      placed.push({ x: pos.x, y: pos.y, clearance });
+      const craters: Array<{ dx: number; dy: number; r: number }> = [];
+      for (let c = 0; c < 4; c++) {
+        const ca = Math.random() * Math.PI * 2;
+        const cd = 0.16 + Math.random() * 0.44;
+        craters.push({
+          dx: Math.cos(ca) * cd,
+          dy: Math.sin(ca) * cd,
+          r: 0.14 + Math.random() * 0.16,
+        });
+      }
+      bodies.push({
+        kind: 'moon',
+        normX: pos.x,
+        normY: pos.y,
+        scale,
+        clearance,
+        lightAngle: Math.random() * Math.PI * 2,
+        litHex: mPal.litHex,
+        midHex: mPal.midHex,
+        darkHex: mPal.darkHex,
+        rimRgb: mPal.rimRgb,
+        craters,
+      });
+    }
+
+    this.sceneryBodies = bodies;
   }
 
   public skipCutscene(): void {
@@ -875,6 +1077,8 @@ export class SolarisEngine {
 
   private finishCutsceneToGameplay(skipped: boolean): void {
     this.state = 'PLAYING';
+    this.arenaZoom = 1;
+    this.overdriveSurgeTimer = 0;
     this.cutsceneTimeScale = 1;
     this.cutsceneFlash = 0;
     this.cutsceneBolts[0].active = false;
@@ -921,6 +1125,7 @@ export class SolarisEngine {
     this.state = 'TITLE_MENU';
     this.playerDying = false;
     this.playerDetonated = false;
+    this.overdriveSurgeTimer = 0;
     this.cutsceneSquadron = [];
     this.clearAllInputs();
     this.releaseAllEntities();
@@ -1109,11 +1314,6 @@ export class SolarisEngine {
     this.canvas.width = Math.floor(w * this.dpr);
     this.canvas.height = Math.floor(h * this.dpr);
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-
-    const padX = Math.min(36, this.width * 0.2);
-    const padY = Math.min(36, this.height * 0.2);
-    this.player.x = Math.min(Math.max(this.player.x, padX), Math.max(padX, this.width - padX));
-    this.player.y = Math.min(Math.max(this.player.y, padY), Math.max(padY, this.height - padY));
   };
 
   private handleKeyDown = (e: KeyboardEvent): void => {
@@ -1336,31 +1536,58 @@ export class SolarisEngine {
     window.removeEventListener('touchcancel', this.handleTouchEnd);
   }
 
+  private getTargetArenaZoom(): number {
+    if (this.wave < 10) return 1;
+    return Math.max(0.68, 0.76 - Math.floor((this.wave - 10) / 5) * 0.04);
+  }
+
   private prepareWave(waveNum: number): void {
     this.wave = waveNum;
     const queue: EnemyType[] = [];
-    const totalCount = 5 + waveNum * 3;
+
+    // Controlled gradual ramp for Waves 1-9, clear escalation starting at Wave 10
+    const totalCount =
+      waveNum < 10 ? 2 + Math.round(waveNum * 1.5) : 19 + (waveNum - 9) * 3;
 
     for (let i = 0; i < totalCount; i++) {
       const r = Math.random();
       if (waveNum === 1) {
-        queue.push(r < 0.78 ? 'SCOUT' : 'STRIKER');
+        queue.push('SCOUT');
       } else if (waveNum === 2) {
-        if (r < 0.5) queue.push('SCOUT');
+        queue.push(r < 0.78 ? 'SCOUT' : 'STRIKER');
+      } else if (waveNum === 3) {
+        queue.push(r < 0.65 ? 'SCOUT' : 'STRIKER');
+      } else if (waveNum === 4) {
+        if (i === totalCount - 1) queue.push('BASTION');
+        else queue.push(r < 0.56 ? 'SCOUT' : 'STRIKER');
+      } else if (waveNum === 5) {
+        if (r < 0.48) queue.push('SCOUT');
         else if (r < 0.82) queue.push('STRIKER');
         else queue.push('BASTION');
+      } else if (waveNum < 10) {
+        if (r < 0.4) queue.push('SCOUT');
+        else if (r < 0.7) queue.push('STRIKER');
+        else if (r < 0.87) queue.push('BASTION');
+        else queue.push('SPLITTER');
       } else {
-        if (r < 0.36) queue.push('SCOUT');
-        else if (r < 0.62) queue.push('STRIKER');
-        else if (r < 0.84) queue.push('BASTION');
+        // Wave 10+: noticeably higher Striker, Bastion & Splitter density
+        if (r < 0.2) queue.push('SCOUT');
+        else if (r < 0.52) queue.push('STRIKER');
+        else if (r < 0.78) queue.push('BASTION');
         else queue.push('SPLITTER');
       }
     }
 
     this.waveSpawnQueue = queue;
-    this.spawnTimer = 0.65;
-    this.waveBanner = `Onda ${waveNum}`;
-    this.waveBannerTimer = 1.9;
+    this.spawnTimer = waveNum === 1 ? 0.85 : waveNum >= 10 ? 0.45 : 0.65;
+    if (waveNum === 10) {
+      this.waveBanner = 'Onda 10 · Zona Expandida';
+      this.waveBannerTimer = 2.6;
+      this.spawnShockwave(this.width * 0.5, this.height * 0.5, Math.max(this.width, this.height) * 0.75, PALETTE.brass, 2.8, 0.75, true);
+    } else {
+      this.waveBanner = `Onda ${waveNum}`;
+      this.waveBannerTimer = 1.9;
+    }
     this.emitHud();
   }
 
@@ -1369,24 +1596,48 @@ export class SolarisEngine {
     let y = overrideY ?? 0;
 
     if (overrideX === undefined || overrideY === undefined) {
-      const margin = 92;
-      const side = Math.floor(Math.random() * 4);
-      if (side === 0) {
-        x = Math.random() * this.width;
-        y = -margin;
-      } else if (side === 1) {
-        x = this.width + margin;
-        y = Math.random() * this.height;
-      } else if (side === 2) {
-        x = Math.random() * this.width;
-        y = this.height + margin;
+      const zoom = Math.max(0.55, this.arenaZoom);
+      const cx = this.width * 0.5;
+      const cy = this.height * 0.5;
+      const halfW = (this.width * 0.5) / zoom;
+      const halfH = (this.height * 0.5) / zoom;
+      const margin = 92 / zoom;
+
+      // If player flew far outside visible zone, spawn near a ring around player so combat remains active
+      const playerFarOffscreen =
+        Math.abs(this.player.x - cx) > halfW + 140 || Math.abs(this.player.y - cy) > halfH + 140;
+
+      if (playerFarOffscreen) {
+        const ang = Math.random() * Math.PI * 2;
+        const spawnDist = Math.max(halfW, halfH) * 0.65 + 140;
+        x = this.player.x + Math.cos(ang) * spawnDist;
+        y = this.player.y + Math.sin(ang) * spawnDist;
       } else {
-        x = -margin;
-        y = Math.random() * this.height;
+        const minX = cx - halfW;
+        const maxX = cx + halfW;
+        const minY = cy - halfH;
+        const maxY = cy + halfH;
+        const side = Math.floor(Math.random() * 4);
+        if (side === 0) {
+          x = minX + Math.random() * (maxX - minX);
+          y = minY - margin;
+        } else if (side === 1) {
+          x = maxX + margin;
+          y = minY + Math.random() * (maxY - minY);
+        } else if (side === 2) {
+          x = minX + Math.random() * (maxX - minX);
+          y = maxY + margin;
+        } else {
+          x = minX - margin;
+          y = minY + Math.random() * (maxY - minY);
+        }
       }
     }
 
-    const hpScale = 1 + Math.floor((this.wave - 1) / 3);
+    const hpScale =
+      this.wave < 10
+        ? 1 + Math.floor((this.wave - 1) / 4)
+        : 3 + Math.floor((this.wave - 10) / 2);
     let radius = 16;
     let hp = 2;
 
@@ -1401,7 +1652,7 @@ export class SolarisEngine {
         break;
       case 'STRIKER':
         radius = 18;
-        hp = 3 + Math.floor((hpScale - 1) * 0.6);
+        hp = 3 + Math.floor((hpScale - 1) * 0.65);
         break;
       case 'BASTION':
         radius = 25;
@@ -1409,7 +1660,7 @@ export class SolarisEngine {
         break;
       case 'SPLITTER':
         radius = 21;
-        hp = 4 + Math.floor(hpScale * 0.7);
+        hp = 4 + Math.floor(hpScale * 0.75);
         break;
     }
 
@@ -1682,6 +1933,9 @@ export class SolarisEngine {
   private update(dt: number): void {
     this.ambientTime += dt;
 
+    const targetZoom = this.state === 'PLAYING' || this.state === 'PAUSED' ? this.getTargetArenaZoom() : 1;
+    this.arenaZoom += (targetZoom - this.arenaZoom) * Math.min(1, dt * 1.8);
+
     if (this.shakeIntensity > 0.05) {
       this.shakePhase += dt;
       this.shakeIntensity *= Math.pow(0.0022, dt);
@@ -1723,6 +1977,10 @@ export class SolarisEngine {
       if (this.repairAnimTimer === 0) {
         this.emitHud();
       }
+    }
+
+    if (this.overdriveSurgeTimer > 0) {
+      this.overdriveSurgeTimer = Math.max(0, this.overdriveSurgeTimer - dt);
     }
 
     if (this.state === 'TITLE_MENU') {
@@ -2021,27 +2279,16 @@ export class SolarisEngine {
     p.x += p.vx * dt;
     p.y += p.vy * dt;
 
-    const pad = 26;
-    if (p.x < pad) {
-      p.x = pad;
-      p.vx = Math.max(0, p.vx);
-    } else if (p.x > this.width - pad) {
-      p.x = this.width - pad;
-      p.vx = Math.min(0, p.vx);
-    }
-    if (p.y < pad) {
-      p.y = pad;
-      p.vy = Math.max(0, p.vy);
-    } else if (p.y > this.height - pad) {
-      p.y = this.height - pad;
-      p.vy = Math.min(0, p.vy);
-    }
+    // Unbounded free flight in open space (no perimeter walls).
+    // Convert screen-space mouse pointer into expanded world-space coordinates for accurate aiming.
+    const worldMouseX = (this.mouseX - this.width * 0.5) / this.arenaZoom + this.width * 0.5;
+    const worldMouseY = (this.mouseY - this.height * 0.5) / this.arenaZoom + this.height * 0.5;
 
     // Aiming: right touch stick > mouse cursor > movement direction
     if (this.aimTouch && (this.aimTouch.dx !== 0 || this.aimTouch.dy !== 0)) {
       p.angle = Math.atan2(this.aimTouch.dy, this.aimTouch.dx);
     } else if (this.mouseMovedRecently) {
-      p.angle = Math.atan2(this.mouseY - p.y, this.mouseX - p.x);
+      p.angle = Math.atan2(worldMouseY - p.y, worldMouseX - p.x);
     } else if (ilen > 0.1) {
       p.angle = Math.atan2(iy, ix);
     }
@@ -2127,8 +2374,11 @@ export class SolarisEngine {
       if (this.spawnTimer <= 0) {
         const nextType = this.waveSpawnQueue.shift()!;
         this.spawnEnemy(nextType);
-        const baseInterval = Math.max(0.38, 1.05 - this.wave * 0.065);
-        this.spawnTimer = baseInterval * (0.75 + Math.random() * 0.45);
+        const baseInterval =
+          this.wave < 10
+            ? Math.max(0.74, 1.28 - (this.wave - 1) * 0.065)
+            : Math.max(0.32, 0.56 - (this.wave - 10) * 0.028);
+        this.spawnTimer = baseInterval * (0.78 + Math.random() * 0.42);
       }
     } else if (this.enemies.length === 0) {
       if (this.waveCooldown <= 0) {
@@ -2148,7 +2398,10 @@ export class SolarisEngine {
   private updateEnemies(dt: number): void {
     const px = this.player.x;
     const py = this.player.y;
-    const speedMult = 1 + Math.min(0.65, (this.wave - 1) * 0.055);
+    const highIntensity = this.wave >= 10;
+    const speedMult = highIntensity
+      ? 1.22 + Math.min(0.68, (this.wave - 10) * 0.05)
+      : 0.88 + (this.wave - 1) * 0.025;
 
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
@@ -2181,7 +2434,7 @@ export class SolarisEngine {
           e.aiTimer -= dt;
           if (e.aiTimer <= 0 && dist < 440) {
             e.aiState = 'WINDUP';
-            e.aiTimer = 0.65;
+            e.aiTimer = highIntensity ? 0.52 : 0.68;
             e.targetAngle = angleToPlayer;
             this.audio.playTelegraph();
           }
@@ -2196,7 +2449,7 @@ export class SolarisEngine {
           if (e.aiTimer <= 0) {
             e.aiState = 'ACTION';
             e.aiTimer = 0.42;
-            const lungeSpeed = 560 * Math.min(1.25, speedMult);
+            const lungeSpeed = 560 * Math.min(1.36, speedMult);
             e.vx = Math.cos(e.targetAngle) * lungeSpeed;
             e.vy = Math.sin(e.targetAngle) * lungeSpeed;
             this.spawnBurst(e.x, e.y, 8, PALETTE.coral, 140, 2.5);
@@ -2208,7 +2461,7 @@ export class SolarisEngine {
           }
           if (e.aiTimer <= 0) {
             e.aiState = 'COOLDOWN';
-            e.aiTimer = 0.75;
+            e.aiTimer = highIntensity ? 0.55 : 0.78;
           }
         } else {
           e.vx *= Math.pow(0.04, dt);
@@ -2216,7 +2469,7 @@ export class SolarisEngine {
           e.aiTimer -= dt;
           if (e.aiTimer <= 0) {
             e.aiState = 'APPROACH';
-            e.aiTimer = 1.2 + Math.random() * 0.8;
+            e.aiTimer = (highIntensity ? 0.9 : 1.25) + Math.random() * 0.8;
           }
         }
       } else if (e.type === 'BASTION') {
@@ -2235,13 +2488,13 @@ export class SolarisEngine {
           e.aiTimer -= dt;
           if (e.aiTimer <= 0 && dist < 560) {
             e.aiState = 'WINDUP';
-            e.aiTimer = 0.8;
+            e.aiTimer = highIntensity ? 0.68 : 0.82;
             this.audio.playTelegraph();
           }
         } else if (e.aiState === 'WINDUP') {
           e.aiTimer -= dt;
           if (e.aiTimer <= 0) {
-            const orbSpeed = 245 * Math.min(1.25, speedMult);
+            const orbSpeed = 245 * Math.min(1.32, speedMult);
             for (let s = 0; s < BASTION_SPREAD.length; s++) {
               const a = angleToPlayer + BASTION_SPREAD[s];
               this.spawnBullet(
@@ -2258,7 +2511,7 @@ export class SolarisEngine {
             }
             this.spawnShockwave(e.x, e.y, 44, PALETTE.coral, 2, 0.25, false);
             e.aiState = 'APPROACH';
-            e.aiTimer = 2.2 + Math.random() * 0.9;
+            e.aiTimer = (highIntensity ? 1.65 : 2.25) + Math.random() * 0.85;
           }
         }
       }
@@ -2331,10 +2584,7 @@ export class SolarisEngine {
 
       if (
         b.life <= 0 ||
-        b.x < -40 ||
-        b.x > this.width + 40 ||
-        b.y < -40 ||
-        b.y > this.height + 40
+        Math.hypot(b.x - p.x, b.y - p.y) > 4000
       ) {
         this.releaseBulletAt(i);
         continue;
@@ -2599,11 +2849,58 @@ export class SolarisEngine {
     const p = this.player;
     p.overdriveTimer = p.overdriveDuration;
     p.overdriveCharge = 100;
+    this.overdriveSurgeTimer = this.overdriveSurgeDuration;
+    this.overdrivePulseId += 1;
     this.audio.playOverdrive();
-    this.vibrate([18, 28, 18]);
-    this.shakeIntensity = Math.max(this.shakeIntensity, 9);
-    this.spawnShockwave(p.x, p.y, 260, PALETTE.brass, 3.5, 0.5, true);
-    this.spawnBurst(p.x, p.y, 26, PALETTE.brass, 290, 3.4);
+    this.vibrate([22, 26, 36]);
+    this.hitstopTimer = Math.max(this.hitstopTimer, 0.045);
+    this.shakeIntensity = Math.max(this.shakeIntensity, 13);
+
+    // Layered vibrant prismatic shockwaves radiating from the ship
+    const prismPalette = ['#FF2E93', '#22D3EE', '#FACC15', '#A855F7', '#34D399', '#FFFFFF'];
+    this.spawnShockwave(p.x, p.y, 340, '#FF2E93', 4.2, 0.62, true);
+    this.spawnShockwave(p.x, p.y, 290, '#22D3EE', 3.4, 0.52, true);
+    this.spawnShockwave(p.x, p.y, 235, '#FACC15', 3.0, 0.44, false);
+    this.spawnShockwave(p.x, p.y, 410, '#A855F7', 2.4, 0.72, false);
+
+    // High-energy chromatic starbursts, sparks & fractured prism arcs
+    for (let i = 0; i < 36; i++) {
+      const a = (i / 36) * Math.PI * 2 + (Math.random() - 0.5) * 0.16;
+      const spd = 190 + Math.random() * 340;
+      const col = prismPalette[i % prismPalette.length];
+      this.spawnParticle(
+        p.x,
+        p.y,
+        Math.cos(a) * spd,
+        Math.sin(a) * spd,
+        3.0 + Math.random() * 3.4,
+        0.42 + Math.random() * 0.42,
+        col,
+        0.92,
+        i % 3 === 0 ? 'star' : 'spark',
+        0,
+        a,
+        (Math.random() - 0.5) * 10
+      );
+    }
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const spd = 140 + Math.random() * 140;
+      this.spawnParticle(
+        p.x,
+        p.y,
+        Math.cos(a) * spd,
+        Math.sin(a) * spd,
+        16 + Math.random() * 10,
+        0.48 + Math.random() * 0.25,
+        prismPalette[i % 4],
+        0.93,
+        'arc',
+        18,
+        a,
+        (Math.random() - 0.5) * 8
+      );
+    }
 
     for (let i = this.bullets.length - 1; i >= 0; i--) {
       if (!this.bullets[i].fromPlayer) {
@@ -2615,9 +2912,9 @@ export class SolarisEngine {
       const dx = e.x - p.x;
       const dy = e.y - p.y;
       const d = Math.hypot(dx, dy) || 1;
-      if (d < 280) {
-        e.vx += (dx / d) * 320;
-        e.vy += (dy / d) * 320;
+      if (d < 340) {
+        e.vx += (dx / d) * 380;
+        e.vy += (dy / d) * 380;
       }
     }
     this.emitHud();
@@ -2693,6 +2990,7 @@ export class SolarisEngine {
       damagePulseId: this.damagePulseId,
       repairAnimRatio: Math.max(0, Math.min(1, this.repairAnimTimer / this.repairAnimDuration)),
       repairPulseId: this.repairPulseId,
+      overdrivePulseId: this.overdrivePulseId,
     });
   }
 
@@ -2754,6 +3052,24 @@ export class SolarisEngine {
       return;
     }
 
+    let warpZoomOffset = 0;
+    let warpTwist = 0;
+    if (this.overdriveSurgeTimer > 0 && this.state === 'PLAYING') {
+      const surgeRatio = Math.max(0, Math.min(1, this.overdriveSurgeTimer / this.overdriveSurgeDuration));
+      const surgeProgress = 1 - surgeRatio;
+      warpZoomOffset = Math.sin(surgeProgress * Math.PI * 2.2) * 0.085 * Math.pow(surgeRatio, 1.3);
+      warpTwist = Math.sin(surgeProgress * 26) * 0.015 * Math.pow(surgeRatio, 1.45) * this.screenShakeScale;
+    }
+
+    ctx.save();
+    ctx.translate(w * 0.5, h * 0.5);
+    if (warpTwist !== 0) {
+      ctx.rotate(warpTwist);
+    }
+    const effectiveZoom = Math.max(0.5, this.arenaZoom + warpZoomOffset);
+    ctx.scale(effectiveZoom, effectiveZoom);
+    ctx.translate(-w * 0.5, -h * 0.5);
+
     this.renderBackdrop(ctx, w, h);
 
     this.renderSparks(ctx);
@@ -2765,19 +3081,32 @@ export class SolarisEngine {
     this.renderParticlesAndWaves(ctx);
     this.renderFloatingTexts(ctx);
 
+    ctx.restore();
+
     if (this.state === 'PLAYING' && !this.playerDying) {
       if (this.showOffscreenIndicators) {
         this.renderOffscreenIndicators(ctx, w, h);
       }
+      this.renderOffscreenPlayerIndicator(ctx, w, h);
       if (this.mouseMovedRecently && !this.touchMode) {
         this.renderReticle(ctx);
       }
       if (this.moveTouch || this.aimTouch) {
         this.renderTouchSticks(ctx);
       }
+    } else if (this.playerDying && !this.playerDetonated) {
+      this.renderOffscreenPlayerIndicator(ctx, w, h);
     }
 
     ctx.restore();
+
+    // Fullscreen Overdrive distortion & vibrant prismatic activation animation
+    if (
+      (this.overdriveSurgeTimer > 0 || this.player.overdriveTimer > 0) &&
+      (this.state === 'PLAYING' || this.state === 'GAME_OVER')
+    ) {
+      this.renderOverdriveFullscreenFx(ctx, w, h);
+    }
 
     // 60fps GPU-fast red damage impact vignette (avoids DOM/React repaints on mobile)
     if (this.damageFlashTimer > 0) {
@@ -2793,16 +3122,206 @@ export class SolarisEngine {
     }
   }
 
+  private renderOverdriveFullscreenFx(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+    const p = this.player;
+    const maxDiag = Math.hypot(w, h);
+    const surgeRatio = Math.max(0, Math.min(1, this.overdriveSurgeTimer / this.overdriveSurgeDuration));
+    const progress = 1 - surgeRatio;
+
+    // Projected ship screen coordinates (clamped softly so off-screen activations still sweep cleanly)
+    const rawOx = (p.x - w * 0.5) * this.arenaZoom + w * 0.5;
+    const rawOy = (p.y - h * 0.5) * this.arenaZoom + h * 0.5;
+    const ox = Math.max(-w * 0.2, Math.min(w * 1.2, rawOx));
+    const oy = Math.max(-h * 0.2, Math.min(h * 1.2, rawOy));
+
+    // 1. Real-time fullscreen spatial wave distortion & chromatic split over the rendered frame
+    if (surgeRatio > 0.14) {
+      const cw = this.canvas.width;
+      const ch = this.canvas.height;
+      if (cw > 32 && ch > 32) {
+        const distPower = Math.pow((surgeRatio - 0.14) / 0.86, 1.35);
+        const stripCount = 26;
+        const stripH = Math.ceil(ch / stripCount);
+        const waveAmpPx = (18 * this.dpr * Math.max(0.35, this.screenShakeScale)) * distPower;
+        const shockCenterY = Math.max(0, Math.min(1, oy / Math.max(1, h)));
+        const shockProgressY = Math.min(1, progress * 1.45);
+
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+        for (let i = 0; i < stripCount; i++) {
+          const sy = i * stripH;
+          const sh = Math.min(stripH, ch - sy);
+          if (sh <= 0) break;
+
+          const yNorm = (i + 0.5) / stripCount;
+          const distFromOriginY = Math.abs(yNorm - shockCenterY);
+          const waveBand = Math.exp(-Math.pow((distFromOriginY - shockProgressY * 0.9) * 3.8, 2));
+          const ripple = Math.sin(yNorm * 20 - progress * 34) * (0.42 + 0.58 * waveBand);
+          const dx = Math.round(ripple * waveAmpPx);
+          const dy = Math.round(Math.cos(yNorm * 14 + progress * 24) * waveAmpPx * 0.18);
+
+          if (dx !== 0 || dy !== 0) {
+            ctx.drawImage(this.canvas, 0, sy, cw, sh, dx, sy + dy, cw, sh);
+          }
+        }
+
+        // Chromatic RGB/CMY echo split across the viewport during peak surge
+        if (surgeRatio > 0.38) {
+          const splitAlpha = ((surgeRatio - 0.38) / 0.62) * 0.22;
+          const shift = Math.round(10 * this.dpr * ((surgeRatio - 0.38) / 0.62));
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalAlpha = splitAlpha;
+          ctx.drawImage(this.canvas, -shift, -Math.round(shift * 0.4));
+          ctx.drawImage(this.canvas, shift, Math.round(shift * 0.4));
+        }
+
+        ctx.restore();
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      }
+    }
+
+    // 2. Fullscreen vibrant spectrum flash, hyper-prism rays & triple chromatic expanding shockwaves
+    if (surgeRatio > 0) {
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const envelope = Math.min(1, progress * 10) * Math.pow(surgeRatio, 0.85);
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+
+      // Fullscreen radial + prismatic gradient wash
+      const washR = Math.max(w, h) * (0.65 + eased * 0.75);
+      const washGrad = ctx.createRadialGradient(ox, oy, 8, ox, oy, washR);
+      washGrad.addColorStop(0, `rgba(255, 255, 255, ${(0.58 * Math.pow(surgeRatio, 2.2)).toFixed(3)})`);
+      washGrad.addColorStop(0.24, `rgba(250, 204, 21, ${(0.42 * envelope).toFixed(3)})`);
+      washGrad.addColorStop(0.52, `rgba(255, 46, 147, ${(0.34 * envelope).toFixed(3)})`);
+      washGrad.addColorStop(0.78, `rgba(34, 211, 238, ${(0.28 * envelope).toFixed(3)})`);
+      washGrad.addColorStop(1, 'rgba(168, 85, 247, 0)');
+      ctx.fillStyle = washGrad;
+      ctx.fillRect(0, 0, w, h);
+
+      // Diagonal vibrant neon edge bleed across the full viewport
+      const sweepOffset = (progress * 1.4 - 0.2) * w;
+      const sweepGrad = ctx.createLinearGradient(sweepOffset - w * 0.45, 0, sweepOffset + w * 0.45, h);
+      sweepGrad.addColorStop(0, 'rgba(34, 211, 238, 0)');
+      sweepGrad.addColorStop(0.28, `rgba(34, 211, 238, ${(0.24 * envelope).toFixed(3)})`);
+      sweepGrad.addColorStop(0.5, `rgba(255, 46, 147, ${(0.28 * envelope).toFixed(3)})`);
+      sweepGrad.addColorStop(0.72, `rgba(250, 204, 21, ${(0.22 * envelope).toFixed(3)})`);
+      sweepGrad.addColorStop(1, 'rgba(168, 85, 247, 0)');
+      ctx.fillStyle = sweepGrad;
+      ctx.fillRect(0, 0, w, h);
+
+      // Rotating vibrant radial hyper-prism light rays sweeping past screen corners
+      const rayCount = 18;
+      const rayColors = [
+        '255, 46, 147',   // Magenta
+        '34, 211, 238',   // Cyan
+        '250, 204, 21',   // Solar Gold
+        '168, 85, 247',   // Electric Violet
+        '52, 211, 153',   // Vivid Emerald
+      ];
+      for (let i = 0; i < rayCount; i++) {
+        const baseA = (i / rayCount) * Math.PI * 2 + progress * 0.55;
+        const spread = 0.022 + (i % 3) * 0.014;
+        const rayLen = maxDiag * (0.6 + eased * 0.65);
+        const rgb = rayColors[i % rayColors.length];
+        const rayAlpha = (0.16 + (i % 2) * 0.08) * envelope;
+
+        const rGrad = ctx.createLinearGradient(
+          ox,
+          oy,
+          ox + Math.cos(baseA) * rayLen,
+          oy + Math.sin(baseA) * rayLen
+        );
+        rGrad.addColorStop(0, `rgba(255, 255, 255, ${(rayAlpha * 1.4).toFixed(3)})`);
+        rGrad.addColorStop(0.35, `rgba(${rgb}, ${rayAlpha.toFixed(3)})`);
+        rGrad.addColorStop(1, `rgba(${rgb}, 0)`);
+
+        ctx.fillStyle = rGrad;
+        ctx.beginPath();
+        ctx.moveTo(ox, oy);
+        ctx.lineTo(ox + Math.cos(baseA - spread) * rayLen, oy + Math.sin(baseA - spread) * rayLen);
+        ctx.lineTo(ox + Math.cos(baseA + spread) * rayLen, oy + Math.sin(baseA + spread) * rayLen);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // Triple Chromatic Aberration Expanding Fullscreen Distortion Rings
+      const baseR = 24 + eased * maxDiag * 1.08;
+      const ringSpecs = [
+        { dr: -14 * surgeRatio, rgb: '255, 46, 147', lw: 5.5, wobbleAmp: 7 },
+        { dr: 0, rgb: '250, 204, 21', lw: 4.5, wobbleAmp: 4 },
+        { dr: 16 * surgeRatio, rgb: '34, 211, 238', lw: 5.5, wobbleAmp: 7 },
+      ];
+      for (let r = 0; r < ringSpecs.length; r++) {
+        const spec = ringSpecs[r];
+        const radius = Math.max(8, baseR + spec.dr);
+        const wobble = spec.wobbleAmp * surgeRatio;
+        ctx.strokeStyle = `rgba(${spec.rgb}, ${(0.72 * envelope).toFixed(3)})`;
+        ctx.lineWidth = Math.max(1.2, spec.lw * surgeRatio);
+        ctx.beginPath();
+        const segs = 48;
+        for (let s = 0; s <= segs; s++) {
+          const a = (s / segs) * Math.PI * 2;
+          const dr = Math.sin(a * 7 + progress * 24 + r * 1.8) * wobble;
+          const px = ox + Math.cos(a) * (radius + dr);
+          const py = oy + Math.sin(a) * (radius + dr);
+          if (s === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.stroke();
+      }
+
+      ctx.restore();
+    }
+
+    // 3. Sustained vibrant chromatic edge aura while Sobrecarga remains active
+    if (p.overdriveTimer > 0 && this.state === 'PLAYING') {
+      const remainRatio = Math.min(1, p.overdriveTimer / 0.8);
+      const pulse = 0.68 + 0.32 * Math.sin(this.ambientTime * 9.5);
+      const hue = (this.ambientTime * 110) % 360;
+      const hueAlt = (hue + 145) % 360;
+      const rInner = Math.min(w, h) * 0.38;
+      const rOuter = maxDiag * 0.56;
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const auraGrad = ctx.createRadialGradient(w * 0.5, h * 0.5, rInner, w * 0.5, h * 0.5, rOuter);
+      auraGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+      auraGrad.addColorStop(0.7, `hsla(${hue.toFixed(0)}, 95%, 60%, ${(0.12 * pulse * remainRatio).toFixed(3)})`);
+      auraGrad.addColorStop(1, `hsla(${hueAlt.toFixed(0)}, 95%, 62%, ${(0.28 * pulse * remainRatio).toFixed(3)})`);
+      ctx.fillStyle = auraGrad;
+      ctx.fillRect(0, 0, w, h);
+      ctx.restore();
+    }
+  }
+
   private renderBackdrop(ctx: CanvasRenderingContext2D, w: number, h: number): void {
-    const offsetX = (this.player.x - w * 0.5) * 0.04;
-    const offsetY = (this.player.y - h * 0.5) * 0.04;
+    const rawDx = this.player.x - w * 0.5;
+    const rawDy = this.player.y - h * 0.5;
     const minDim = Math.min(w, h);
     const maxDim = Math.max(w, h);
 
+    // Bounded deep-space parallax preserves strict non-overlap between celestial bodies at any flight distance
+    const deepOffsetX = Math.tanh(rawDx / Math.max(600, w * 1.4)) * 72;
+    const deepOffsetY = Math.tanh(rawDy / Math.max(450, h * 1.4)) * 56;
+    const astrolabeOffsetX = Math.tanh(rawDx / Math.max(500, w)) * 22;
+    const astrolabeOffsetY = Math.tanh(rawDy / Math.max(400, h)) * 18;
+    const starScrollX = rawDx * 0.14;
+    const starScrollY = rawDy * 0.14;
+
+    // Expanded view coverage so zoomed-out Wave 10+ and starfields fill the full canvas edge-to-edge
+    const zoom = Math.max(0.55, this.arenaZoom);
+    const spanW = w / zoom;
+    const spanH = h / zoom;
+    const originX = w * 0.5 - spanW * 0.5;
+    const originY = h * 0.5 - spanH * 0.5;
+
     // 1. Randomized Cosmic Nebula (unique position, scale & palette per match)
     const neb = this.combatNebula;
-    const nebX = neb.normX * w - offsetX * 0.14;
-    const nebY = neb.normY * h - offsetY * 0.14;
+    const nebX = neb.normX * w - deepOffsetX * 0.85;
+    const nebY = neb.normY * h - deepOffsetY * 0.85;
     const nebBaseR = maxDim * neb.scale;
 
     ctx.save();
@@ -2836,153 +3355,325 @@ export class SolarisEngine {
     }
     ctx.restore();
 
-    // 2. Randomized Distant Planet (guaranteed separated from Nebula)
-    const pl = this.combatPlanet;
-    const plX = pl.normX * w - offsetX * 0.22;
-    const plY = pl.normY * h - offsetY * 0.22;
-    const plR = Math.max(24, minDim * pl.scale);
-    const lx = Math.cos(pl.lightAngle);
-    const ly = Math.sin(pl.lightAngle);
+    // 2. Dispersed Non-Overlapping Cosmic Scenery (Planets, Luminous Stars, Natural Satellites, Black Holes)
+    for (let i = 0; i < this.sceneryBodies.length; i++) {
+      const body = this.sceneryBodies[i];
+      const bx = body.normX * w - deepOffsetX;
+      const by = body.normY * h - deepOffsetY;
+      const br = Math.max(10, minDim * body.scale);
 
-    ctx.save();
-    ctx.translate(plX, plY);
+      if (body.kind === 'star_body') {
+        const pulse = 0.92 + 0.08 * Math.sin(this.ambientTime * 1.6 + body.pulseOffset);
+        const coronaR = br * 2.35 * pulse;
 
-    // Subtle atmospheric outer halo
-    const atmoHalo = ctx.createRadialGradient(
-      lx * plR * 0.28,
-      ly * plR * 0.28,
-      plR * 0.85,
-      0,
-      0,
-      plR * 1.48
-    );
-    atmoHalo.addColorStop(0, `rgba(${pl.rimRgb}, 0.22)`);
-    atmoHalo.addColorStop(0.55, `rgba(${pl.rimRgb}, 0.07)`);
-    atmoHalo.addColorStop(1, `rgba(${pl.rimRgb}, 0)`);
-    ctx.fillStyle = atmoHalo;
-    ctx.beginPath();
-    ctx.arc(0, 0, plR * 1.48, 0, Math.PI * 2);
-    ctx.fill();
+        ctx.save();
+        ctx.translate(bx, by);
+        ctx.globalCompositeOperation = 'screen';
 
-    // Back half of planetary rings (if ringed)
-    if (pl.hasRings) {
+        const halo = ctx.createRadialGradient(0, 0, br * 0.12, 0, 0, coronaR);
+        halo.addColorStop(0, body.coreHex);
+        halo.addColorStop(0.24, `rgba(${body.coronaRgb}, 0.72)`);
+        halo.addColorStop(0.55, `rgba(${body.coronaRgb}, 0.22)`);
+        halo.addColorStop(1, `rgba(${body.coronaRgb}, 0)`);
+        ctx.fillStyle = halo;
+        ctx.beginPath();
+        ctx.arc(0, 0, coronaR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Crisp 4-point stellar diffraction spikes
+        ctx.rotate(body.rayAngle);
+        ctx.fillStyle = `rgba(${body.coronaRgb}, 0.48)`;
+        for (let r = 0; r < 2; r++) {
+          ctx.rotate(Math.PI * 0.5);
+          ctx.beginPath();
+          ctx.ellipse(0, 0, coronaR * 0.92, Math.max(1.2, br * 0.09), 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.fillStyle = body.coreHex;
+        ctx.beginPath();
+        ctx.arc(0, 0, br * 0.42, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+        continue;
+      }
+
+      if (body.kind === 'black_hole') {
+        const spin = this.ambientTime * 0.45 * body.spinDir;
+        ctx.save();
+        ctx.translate(bx, by);
+
+        // Outer relativistic gravitational lensing aura
+        const lensR = br * 2.45;
+        const lensGrad = ctx.createRadialGradient(0, 0, br * 0.72, 0, 0, lensR);
+        lensGrad.addColorStop(0, `rgba(${body.accretionRgb}, 0.36)`);
+        lensGrad.addColorStop(0.45, `rgba(${body.accretionRgb}, 0.14)`);
+        lensGrad.addColorStop(1, 'rgba(11, 19, 32, 0)');
+        ctx.fillStyle = lensGrad;
+        ctx.beginPath();
+        ctx.arc(0, 0, lensR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Back half of relativistic accretion disk
+        ctx.save();
+        ctx.rotate(body.diskTilt);
+        ctx.strokeStyle = `rgba(${body.accretionRgb}, 0.58)`;
+        ctx.lineWidth = Math.max(3, br * 0.24);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, br * 2.22, br * 0.52, 0, Math.PI, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = `rgba(${body.hotRgb}, 0.42)`;
+        ctx.lineWidth = Math.max(1.4, br * 0.09);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, br * 1.85, br * 0.42, 0, Math.PI, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+
+        // Pitch-black event horizon core + luminous photon sphere ring
+        ctx.fillStyle = '#03050B';
+        ctx.beginPath();
+        ctx.arc(0, 0, br * 0.86, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = `rgba(${body.hotRgb}, 0.85)`;
+        ctx.lineWidth = Math.max(1.4, br * 0.065);
+        ctx.beginPath();
+        ctx.arc(0, 0, br * 0.88, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Swirling matter arcs around photon ring
+        ctx.save();
+        ctx.rotate(spin);
+        ctx.strokeStyle = `rgba(${body.accretionRgb}, 0.48)`;
+        ctx.lineWidth = Math.max(1, br * 0.045);
+        ctx.setLineDash([br * 0.42, br * 0.55]);
+        ctx.beginPath();
+        ctx.arc(0, 0, br * 1.12, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+
+        // Bright front arc of accretion disk crossing over the black hole horizon
+        ctx.save();
+        ctx.rotate(body.diskTilt);
+        ctx.strokeStyle = `rgba(${body.accretionRgb}, 0.72)`;
+        ctx.lineWidth = Math.max(3.2, br * 0.25);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, br * 2.22, br * 0.52, 0, 0, Math.PI);
+        ctx.stroke();
+
+        ctx.strokeStyle = `rgba(${body.hotRgb}, 0.72)`;
+        ctx.lineWidth = Math.max(1.4, br * 0.09);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, br * 1.85, br * 0.42, 0, 0, Math.PI);
+        ctx.stroke();
+        ctx.restore();
+
+        ctx.restore();
+        continue;
+      }
+
+      if (body.kind === 'moon') {
+        const lx = Math.cos(body.lightAngle);
+        const ly = Math.sin(body.lightAngle);
+
+        ctx.save();
+        ctx.translate(bx, by);
+        ctx.beginPath();
+        ctx.arc(0, 0, br, 0, Math.PI * 2);
+        ctx.clip();
+
+        const moonGrad = ctx.createRadialGradient(
+          lx * br * 0.42,
+          ly * br * 0.42,
+          br * 0.06,
+          -lx * br * 0.25,
+          -ly * br * 0.25,
+          br * 1.32
+        );
+        moonGrad.addColorStop(0, body.litHex);
+        moonGrad.addColorStop(0.5, body.midHex);
+        moonGrad.addColorStop(0.88, body.darkHex);
+        moonGrad.addColorStop(1, '#060A13');
+        ctx.fillStyle = moonGrad;
+        ctx.fillRect(-br - 1, -br - 1, br * 2 + 2, br * 2 + 2);
+
+        // Natural satellite impact craters
+        for (let c = 0; c < body.craters.length; c++) {
+          const cr = body.craters[c];
+          const cx0 = cr.dx * br;
+          const cy0 = cr.dy * br;
+          const cRad = cr.r * br;
+          ctx.fillStyle = 'rgba(7, 11, 20, 0.26)';
+          ctx.beginPath();
+          ctx.arc(cx0, cy0, cRad, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = `rgba(${body.rimRgb}, 0.22)`;
+          ctx.lineWidth = 0.8;
+          ctx.beginPath();
+          ctx.arc(cx0, cy0, cRad, body.lightAngle - 1.1, body.lightAngle + 1.1);
+          ctx.stroke();
+        }
+
+        // Terminator shadow
+        const mNight = ctx.createRadialGradient(
+          lx * br * 0.55,
+          ly * br * 0.55,
+          br * 0.3,
+          0,
+          0,
+          br * 1.04
+        );
+        mNight.addColorStop(0, 'rgba(7, 11, 20, 0)');
+        mNight.addColorStop(0.76, 'rgba(7, 11, 20, 0.42)');
+        mNight.addColorStop(1, 'rgba(7, 11, 20, 0.84)');
+        ctx.fillStyle = mNight;
+        ctx.fillRect(-br - 1, -br - 1, br * 2 + 2, br * 2 + 2);
+        ctx.restore();
+        continue;
+      }
+
+      // Planet
+      const plR = br;
+      const lx = Math.cos(body.lightAngle);
+      const ly = Math.sin(body.lightAngle);
+
       ctx.save();
-      ctx.rotate(pl.ringTilt);
-      ctx.strokeStyle = `rgba(${pl.rimRgb}, 0.28)`;
-      ctx.lineWidth = Math.max(2.2, plR * 0.14);
+      ctx.translate(bx, by);
+
+      const atmoHalo = ctx.createRadialGradient(
+        lx * plR * 0.28,
+        ly * plR * 0.28,
+        plR * 0.85,
+        0,
+        0,
+        plR * 1.48
+      );
+      atmoHalo.addColorStop(0, `rgba(${body.rimRgb}, 0.22)`);
+      atmoHalo.addColorStop(0.55, `rgba(${body.rimRgb}, 0.07)`);
+      atmoHalo.addColorStop(1, `rgba(${body.rimRgb}, 0)`);
+      ctx.fillStyle = atmoHalo;
       ctx.beginPath();
-      ctx.ellipse(0, 0, plR * 2.05, plR * 0.46, 0, Math.PI, Math.PI * 2);
-      ctx.stroke();
-      ctx.strokeStyle = `rgba(${pl.bandRgb}, 0.14)`;
-      ctx.lineWidth = Math.max(1.2, plR * 0.06);
+      ctx.arc(0, 0, plR * 1.48, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (body.hasRings) {
+        ctx.save();
+        ctx.rotate(body.ringTilt);
+        ctx.strokeStyle = `rgba(${body.rimRgb}, 0.28)`;
+        ctx.lineWidth = Math.max(2.2, plR * 0.14);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, plR * 2.05, plR * 0.46, 0, Math.PI, Math.PI * 2);
+        ctx.stroke();
+        ctx.strokeStyle = `rgba(${body.bandRgb}, 0.14)`;
+        ctx.lineWidth = Math.max(1.2, plR * 0.06);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, plR * 1.72, plR * 0.38, 0, Math.PI, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      ctx.save();
       ctx.beginPath();
-      ctx.ellipse(0, 0, plR * 1.72, plR * 0.38, 0, Math.PI, Math.PI * 2);
+      ctx.arc(0, 0, plR, 0, Math.PI * 2);
+      ctx.clip();
+
+      const sphereGrad = ctx.createRadialGradient(
+        lx * plR * 0.45,
+        ly * plR * 0.45,
+        plR * 0.08,
+        -lx * plR * 0.25,
+        -ly * plR * 0.25,
+        plR * 1.38
+      );
+      sphereGrad.addColorStop(0, body.litHex);
+      sphereGrad.addColorStop(0.46, body.midHex);
+      sphereGrad.addColorStop(0.86, body.darkHex);
+      sphereGrad.addColorStop(1, '#070B14');
+      ctx.fillStyle = sphereGrad;
+      ctx.fillRect(-plR - 2, -plR - 2, plR * 2 + 4, plR * 2 + 4);
+
+      ctx.save();
+      ctx.rotate(body.ringTilt * 0.65);
+      ctx.fillStyle = `rgba(${body.bandRgb}, 0.11)`;
+      ctx.fillRect(-plR * 1.1, -plR * 0.38, plR * 2.2, plR * 0.14);
+      ctx.fillStyle = `rgba(${body.bandRgb}, 0.07)`;
+      ctx.fillRect(-plR * 1.1, plR * 0.1, plR * 2.2, plR * 0.18);
+      ctx.restore();
+
+      const nightGrad = ctx.createRadialGradient(
+        lx * plR * 0.55,
+        ly * plR * 0.55,
+        plR * 0.35,
+        0,
+        0,
+        plR * 1.05
+      );
+      nightGrad.addColorStop(0, 'rgba(7, 11, 20, 0)');
+      nightGrad.addColorStop(0.75, 'rgba(7, 11, 20, 0.38)');
+      nightGrad.addColorStop(1, 'rgba(7, 11, 20, 0.82)');
+      ctx.fillStyle = nightGrad;
+      ctx.fillRect(-plR - 2, -plR - 2, plR * 2 + 4, plR * 2 + 4);
+
+      ctx.strokeStyle = `rgba(${body.rimRgb}, 0.45)`;
+      ctx.lineWidth = Math.max(1.2, plR * 0.04);
+      ctx.beginPath();
+      ctx.arc(0, 0, plR - 0.5, body.lightAngle - 1.15, body.lightAngle + 1.15);
       ctx.stroke();
+      ctx.restore();
+
+      if (body.hasRings) {
+        ctx.save();
+        ctx.rotate(body.ringTilt);
+        ctx.strokeStyle = `rgba(${body.rimRgb}, 0.36)`;
+        ctx.lineWidth = Math.max(2.2, plR * 0.14);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, plR * 2.05, plR * 0.46, 0, 0, Math.PI);
+        ctx.stroke();
+        ctx.strokeStyle = `rgba(${body.bandRgb}, 0.18)`;
+        ctx.lineWidth = Math.max(1.2, plR * 0.06);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, plR * 1.72, plR * 0.38, 0, 0, Math.PI);
+        ctx.stroke();
+        ctx.restore();
+      }
+
       ctx.restore();
     }
 
-    // Planet sphere clipped with directional lighting & subtle atmospheric bands
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(0, 0, plR, 0, Math.PI * 2);
-    ctx.clip();
-
-    const sphereGrad = ctx.createRadialGradient(
-      lx * plR * 0.45,
-      ly * plR * 0.45,
-      plR * 0.08,
-      -lx * plR * 0.25,
-      -ly * plR * 0.25,
-      plR * 1.38
-    );
-    sphereGrad.addColorStop(0, pl.litHex);
-    sphereGrad.addColorStop(0.46, pl.midHex);
-    sphereGrad.addColorStop(0.86, pl.darkHex);
-    sphereGrad.addColorStop(1, '#070B14');
-    ctx.fillStyle = sphereGrad;
-    ctx.fillRect(-plR - 2, -plR - 2, plR * 2 + 4, plR * 2 + 4);
-
-    // Subtle gas/cloud latitude bands tilted with ring/axis
-    ctx.save();
-    ctx.rotate(pl.ringTilt * 0.65);
-    ctx.fillStyle = `rgba(${pl.bandRgb}, 0.11)`;
-    ctx.fillRect(-plR * 1.1, -plR * 0.38, plR * 2.2, plR * 0.14);
-    ctx.fillStyle = `rgba(${pl.bandRgb}, 0.07)`;
-    ctx.fillRect(-plR * 1.1, plR * 0.1, plR * 2.2, plR * 0.18);
-    ctx.restore();
-
-    // Deep night-side crescent shadow overlay for crisp 3D depth
-    const nightGrad = ctx.createRadialGradient(
-      lx * plR * 0.55,
-      ly * plR * 0.55,
-      plR * 0.35,
-      0,
-      0,
-      plR * 1.05
-    );
-    nightGrad.addColorStop(0, 'rgba(7, 11, 20, 0)');
-    nightGrad.addColorStop(0.75, 'rgba(7, 11, 20, 0.38)');
-    nightGrad.addColorStop(1, 'rgba(7, 11, 20, 0.82)');
-    ctx.fillStyle = nightGrad;
-    ctx.fillRect(-plR - 2, -plR - 2, plR * 2 + 4, plR * 2 + 4);
-
-    // Sunlit atmospheric limb rim
-    ctx.strokeStyle = `rgba(${pl.rimRgb}, 0.45)`;
-    ctx.lineWidth = Math.max(1.2, plR * 0.04);
-    ctx.beginPath();
-    ctx.arc(0, 0, plR - 0.5, pl.lightAngle - 1.15, pl.lightAngle + 1.15);
-    ctx.stroke();
-    ctx.restore();
-
-    // Front half of planetary rings (drawn cleanly over planet equator)
-    if (pl.hasRings) {
-      ctx.save();
-      ctx.rotate(pl.ringTilt);
-      ctx.strokeStyle = `rgba(${pl.rimRgb}, 0.36)`;
-      ctx.lineWidth = Math.max(2.2, plR * 0.14);
-      ctx.beginPath();
-      ctx.ellipse(0, 0, plR * 2.05, plR * 0.46, 0, 0, Math.PI);
-      ctx.stroke();
-      ctx.strokeStyle = `rgba(${pl.bandRgb}, 0.18)`;
-      ctx.lineWidth = Math.max(1.2, plR * 0.06);
-      ctx.beginPath();
-      ctx.ellipse(0, 0, plR * 1.72, plR * 0.38, 0, 0, Math.PI);
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    ctx.restore();
-
-    // 3. Starfield & Astrolabe Meridian Backdrop
+    // 3. Endless Deep-Space Starfield
     for (const star of this.stars) {
-      const sx = ((star.x * w - offsetX * star.depth) % w + w) % w;
-      const sy = ((star.y * h - offsetY * star.depth) % h + h) % h;
+      const sx = originX + (((star.x * spanW - starScrollX * star.depth) % spanW + spanW) % spanW);
+      const sy = originY + (((star.y * spanH - starScrollY * star.depth) % spanH + spanH) % spanH);
       const twinkle = 0.72 + 0.28 * Math.sin(this.ambientTime * 1.8 + star.twinklePhase);
       ctx.fillStyle = `rgba(244, 239, 230, ${(star.alpha * twinkle).toFixed(3)})`;
       ctx.beginPath();
-      ctx.arc(sx, sy, star.size, 0, Math.PI * 2);
+      ctx.arc(sx, sy, star.size / Math.sqrt(zoom), 0, Math.PI * 2);
       ctx.fill();
     }
 
-    const cx = w * 0.5 - offsetX * 0.35;
-    const cy = h * 0.5 - offsetY * 0.35;
+    // 4. Prominent Spinning Great Astrolabe Meridian Rings beneath the Battlefield
+    const cx = w * 0.5 - astrolabeOffsetX;
+    const cy = h * 0.5 - astrolabeOffsetY;
+    const zoneScale = 1 / zoom;
 
     ctx.save();
     ctx.translate(cx, cy);
 
     // Wide outer astrolabe meridian ring & equatorial axis for landscape viewports
     if (w > h * 1.15) {
-      ctx.strokeStyle = 'rgba(232, 184, 75, 0.05)';
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(232, 184, 75, 0.18)';
+      ctx.lineWidth = 1.6;
       ctx.beginPath();
-      ctx.arc(0, 0, maxDim * 0.36, 0, Math.PI * 2);
+      ctx.arc(0, 0, maxDim * 0.36 * zoneScale, 0, Math.PI * 2);
       ctx.stroke();
 
-      // Subtle horizontal equatorial axis spanning the widescreen arena
-      const axisSpan = w * 0.44;
-      const innerGap = minDim * 0.4;
+      const axisSpan = w * 0.46 * zoneScale;
+      const innerGap = minDim * 0.43 * zoneScale;
       if (axisSpan > innerGap + 24) {
-        ctx.strokeStyle = 'rgba(232, 184, 75, 0.065)';
+        ctx.strokeStyle = 'rgba(232, 184, 75, 0.19)';
+        ctx.lineWidth = 1.4;
         ctx.beginPath();
         ctx.moveTo(-axisSpan, 0);
         ctx.lineTo(-innerGap, 0);
@@ -2990,47 +3681,109 @@ export class SolarisEngine {
         ctx.lineTo(axisSpan, 0);
         ctx.stroke();
 
-        // Small astrolabe graduation ticks along the horizontal wings
         const tickOffsets = [innerGap + (axisSpan - innerGap) * 0.45, axisSpan];
         for (const tx of tickOffsets) {
           ctx.beginPath();
-          ctx.moveTo(-tx, -5);
-          ctx.lineTo(-tx, 5);
-          ctx.moveTo(tx, -5);
-          ctx.lineTo(tx, 5);
+          ctx.moveTo(-tx, -7);
+          ctx.lineTo(-tx, 7);
+          ctx.moveTo(tx, -7);
+          ctx.lineTo(tx, 7);
           ctx.stroke();
         }
       }
     }
 
-    ctx.strokeStyle = 'rgba(232, 184, 75, 0.09)';
-    ctx.lineWidth = 1;
+    // Expanded Level 10+ outer perimeter ring
+    if (zoom < 0.98) {
+      const expandAlpha = Math.min(1, (1 - zoom) / 0.22);
+      ctx.save();
+      ctx.rotate(-this.ambientTime * 0.03);
+      ctx.strokeStyle = `rgba(232, 184, 75, ${(0.25 * expandAlpha).toFixed(3)})`;
+      ctx.lineWidth = 2.0;
+      ctx.setLineDash([16, 12]);
+      ctx.beginPath();
+      ctx.arc(0, 0, minDim * 0.56 * zoneScale, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+
+    // Outer calibrated meridian ring (slow clockwise rotation + 12 astrolabe degree notches)
+    ctx.save();
+    ctx.rotate(this.ambientTime * 0.032);
+    const outerR = minDim * 0.42 * zoneScale;
+    ctx.strokeStyle = 'rgba(232, 184, 75, 0.26)';
+    ctx.lineWidth = 2.1;
     ctx.beginPath();
-    ctx.arc(0, 0, minDim * 0.38, 0, Math.PI * 2);
+    ctx.arc(0, 0, outerR, 0, Math.PI * 2);
     ctx.stroke();
 
-    ctx.save();
-    ctx.rotate(this.ambientTime * 0.05);
-    ctx.strokeStyle = 'rgba(232, 184, 75, 0.075)';
-    ctx.setLineDash([6, 14]);
+    ctx.strokeStyle = 'rgba(244, 239, 230, 0.12)';
+    ctx.lineWidth = 1.1;
     ctx.beginPath();
-    ctx.arc(0, 0, minDim * 0.26, 0, Math.PI * 2);
+    ctx.arc(0, 0, outerR - 7, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(232, 184, 75, 0.34)';
+    ctx.lineWidth = 1.6;
+    for (let i = 0; i < 12; i++) {
+      const a = (i * Math.PI * 2) / 12;
+      const tickIn = i % 3 === 0 ? outerR - 12 : outerR - 6;
+      const tickOut = i % 3 === 0 ? outerR + 8 : outerR + 4;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * tickIn, Math.sin(a) * tickIn);
+      ctx.lineTo(Math.cos(a) * tickOut, Math.sin(a) * tickOut);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Middle counter-rotating dashed meridian ring + orbiting brass pips
+    ctx.save();
+    ctx.rotate(-this.ambientTime * 0.065);
+    const midR = minDim * 0.285 * zoneScale;
+    ctx.strokeStyle = 'rgba(232, 184, 75, 0.28)';
+    ctx.lineWidth = 1.9;
+    ctx.setLineDash([10, 12]);
+    ctx.beginPath();
+    ctx.arc(0, 0, midR, 0, Math.PI * 2);
     ctx.stroke();
     ctx.setLineDash([]);
 
     for (let i = 0; i < 4; i++) {
       const a = (i * Math.PI) / 2;
+      ctx.strokeStyle = 'rgba(232, 184, 75, 0.32)';
+      ctx.lineWidth = 1.6;
       ctx.beginPath();
-      ctx.moveTo(Math.cos(a) * (minDim * 0.245), Math.sin(a) * (minDim * 0.245));
-      ctx.lineTo(Math.cos(a) * (minDim * 0.275), Math.sin(a) * (minDim * 0.275));
+      ctx.moveTo(Math.cos(a) * (midR - 9), Math.sin(a) * (midR - 9));
+      ctx.lineTo(Math.cos(a) * (midR + 9), Math.sin(a) * (midR + 9));
       ctx.stroke();
+
+      if (i % 2 === 0) {
+        ctx.fillStyle = 'rgba(232, 184, 75, 0.48)';
+        ctx.beginPath();
+        ctx.arc(Math.cos(a) * midR, Math.sin(a) * midR, 3.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
     ctx.restore();
 
-    ctx.strokeStyle = 'rgba(232, 184, 75, 0.05)';
+    // Inner compass dial ring
+    ctx.save();
+    ctx.rotate(this.ambientTime * 0.1);
+    const innerR = minDim * 0.135 * zoneScale;
+    ctx.strokeStyle = 'rgba(232, 184, 75, 0.22)';
+    ctx.lineWidth = 1.6;
     ctx.beginPath();
-    ctx.arc(0, 0, minDim * 0.12, 0, Math.PI * 2);
+    ctx.arc(0, 0, innerR, 0, Math.PI * 2);
     ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(244, 239, 230, 0.14)';
+    ctx.setLineDash([4, 9]);
+    ctx.beginPath();
+    ctx.arc(0, 0, innerR * 0.72, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
 
     ctx.restore();
   }
@@ -3399,12 +4152,22 @@ export class SolarisEngine {
     }
 
     if (!dying && p.overdriveTimer > 0) {
-      const pulse = 1 + Math.sin(this.ambientTime * 16) * 0.08;
-      ctx.strokeStyle = 'rgba(255, 123, 102, 0.55)';
-      ctx.lineWidth = 2;
+      const pulse = 1 + Math.sin(this.ambientTime * 16) * 0.09;
+      const hue = (this.ambientTime * 180) % 360;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.strokeStyle = `hsla(${hue.toFixed(0)}, 95%, 64%, 0.78)`;
+      ctx.lineWidth = 2.4;
       ctx.beginPath();
       ctx.arc(0, 0, 27 * pulse, 0, Math.PI * 2);
       ctx.stroke();
+
+      ctx.strokeStyle = `hsla(${((hue + 140) % 360).toFixed(0)}, 95%, 64%, 0.5)`;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(0, 0, 32 * (2 - pulse), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
     }
 
     if (!dying && this.repairAnimTimer > 0) {
@@ -3925,15 +4688,20 @@ export class SolarisEngine {
   private renderOffscreenIndicators(ctx: CanvasRenderingContext2D, w: number, h: number): void {
     const padX = 24;
     const padY = 24;
+    const zoom = this.arenaZoom;
+    const halfW = w * 0.5;
+    const halfH = h * 0.5;
 
     for (const e of this.enemies) {
+      const sx = (e.x - halfW) * zoom + halfW;
+      const sy = (e.y - halfH) * zoom + halfH;
       // Only show for enemies outside (or just breaching) the visible screen bounds
-      if (e.x >= 8 && e.x <= w - 8 && e.y >= 8 && e.y <= h - 8) continue;
+      if (sx >= 8 && sx <= w - 8 && sy >= 8 && sy <= h - 8) continue;
 
-      const ix = Math.max(padX, Math.min(w - padX, e.x));
-      const iy = Math.max(padY, Math.min(h - padY, e.y));
-      const dx = e.x - ix;
-      const dy = e.y - iy;
+      const ix = Math.max(padX, Math.min(w - padX, sx));
+      const iy = Math.max(padY, Math.min(h - padY, sy));
+      const dx = sx - ix;
+      const dy = sy - iy;
       const offDist = Math.hypot(dx, dy);
       const angle = Math.atan2(dy, dx);
 
@@ -4013,6 +4781,133 @@ export class SolarisEngine {
 
       ctx.restore();
     }
+  }
+
+  private renderOffscreenPlayerIndicator(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+    const p = this.player;
+    const zoom = this.arenaZoom;
+    const halfW = w * 0.5;
+    const halfH = h * 0.5;
+    const screenPx = (p.x - halfW) * zoom + halfW;
+    const screenPy = (p.y - halfH) * zoom + halfH;
+
+    if (screenPx >= 12 && screenPx <= w - 12 && screenPy >= 12 && screenPy <= h - 12) {
+      return;
+    }
+
+    const lensR = 27;
+    const padX = 48;
+    const padTop = 76;
+    const padBottom = 52;
+    const bx = Math.max(padX, Math.min(w - padX, screenPx));
+    const by = Math.max(padTop, Math.min(h - padBottom, screenPy));
+    const dirAngle = Math.atan2(screenPy - by, screenPx - bx);
+    const outDistMeters = Math.max(1, Math.round(Math.hypot(screenPx - bx, screenPy - by) / 8));
+
+    const rimColor =
+      this.repairAnimTimer > 0
+        ? '#7AE4FF'
+        : p.overdriveTimer > 0 || p.hp <= 1
+          ? PALETTE.coralBright
+          : PALETTE.brass;
+
+    ctx.save();
+
+    // 1. Soft outer lens glow
+    const halo = ctx.createRadialGradient(bx, by, lensR * 0.7, bx, by, lensR * 1.55);
+    halo.addColorStop(0, p.overdriveTimer > 0 ? 'rgba(255, 123, 102, 0.34)' : 'rgba(232, 184, 75, 0.3)');
+    halo.addColorStop(1, 'rgba(11, 19, 32, 0)');
+    ctx.fillStyle = halo;
+    ctx.beginPath();
+    ctx.arc(bx, by, lensR * 1.55, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 2. Clipped live miniature viewport showing Solaris & nearby threats/shots
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(bx, by, lensR, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(11, 19, 32, 0.92)';
+    ctx.fill();
+    ctx.clip();
+
+    // Subtle astrolabe reticle inside mini lens
+    ctx.strokeStyle = 'rgba(232, 184, 75, 0.16)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(bx, by, lensR * 0.56, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Nearby enemies & bullets mapped into local mini-radar view
+    const miniScale = 0.22;
+    for (let i = 0; i < this.enemies.length; i++) {
+      const e = this.enemies[i];
+      const relX = (e.x - p.x) * miniScale;
+      const relY = (e.y - p.y) * miniScale;
+      if (Math.hypot(relX, relY) < lensR - 3) {
+        ctx.fillStyle = e.type === 'STRIKER' ? PALETTE.coralBright : PALETTE.brass;
+        ctx.beginPath();
+        ctx.arc(bx + relX, by + relY, 2.3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    for (let i = 0; i < this.bullets.length; i++) {
+      const b = this.bullets[i];
+      const relX = (b.x - p.x) * miniScale;
+      const relY = (b.y - p.y) * miniScale;
+      if (Math.hypot(relX, relY) < lensR - 2) {
+        ctx.fillStyle = b.fromPlayer ? PALETTE.ivory : PALETTE.coralBright;
+        ctx.beginPath();
+        ctx.arc(bx + relX, by + relY, 1.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Live miniature Solaris ship rotated to actual heading
+    ctx.save();
+    ctx.translate(bx, by);
+    ctx.rotate(p.angle);
+    ctx.scale(0.55, 0.55);
+    const isMoving = Math.hypot(p.vx, p.vy) > 40 || p.dashTimer > 0;
+    this.drawShipHull(ctx, p.overdriveTimer > 0, isMoving ? 1.15 : 0.45, false);
+    ctx.restore();
+
+    ctx.restore(); // end lens clip
+
+    // 3. Crisp rim border & cardinal degree ticks
+    ctx.strokeStyle = rimColor;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(bx, by, lensR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 4. Outward directional chevrons pointing toward ship's true space position (Astervoid style)
+    ctx.save();
+    ctx.translate(bx, by);
+    ctx.rotate(dirAngle);
+    const pulse = 0.72 + 0.28 * Math.sin(this.ambientTime * 8);
+    ctx.strokeStyle = rimColor;
+    ctx.lineWidth = 2.1;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (let c = 0; c < 2; c++) {
+      const tipX = lensR + 7 + c * 6;
+      ctx.globalAlpha = pulse * (c === 0 ? 0.95 : 0.62);
+      ctx.beginPath();
+      ctx.moveTo(tipX - 5, -5.5);
+      ctx.lineTo(tipX, 0);
+      ctx.lineTo(tipX - 5, 5.5);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // 5. Compact distance readout positioned on the inward side of the lens
+    const labelY = by > h * 0.5 ? by - lensR - 10 : by + lensR + 17;
+    ctx.font = '600 10px "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = PALETTE.ivory;
+    ctx.fillText(`SOLARIS · ${outDistMeters}m`, bx, labelY);
+
+    ctx.restore();
   }
 
   private renderReticle(ctx: CanvasRenderingContext2D): void {

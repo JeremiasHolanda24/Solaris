@@ -9,9 +9,11 @@ interface SettingsModalProps {
   muted: boolean;
   audioSettings: AudioSettings;
   gameplaySettings: GameplaySettings;
+  tutorialEnabled: boolean;
   onToggleMute: () => void;
   onAudioChange: (partial: Partial<AudioSettings>) => void;
   onGameplayChange: (partial: Partial<GameplaySettings>) => void;
+  onToggleTutorialEnabled: () => void;
   onTestSfx: () => void;
   onTestVoice: () => void;
   onResetDefaults: () => void;
@@ -219,9 +221,11 @@ export function SettingsModal({
   muted,
   audioSettings,
   gameplaySettings,
+  tutorialEnabled,
   onToggleMute,
   onAudioChange,
   onGameplayChange,
+  onToggleTutorialEnabled,
   onTestSfx,
   onTestVoice,
   onResetDefaults,
@@ -358,6 +362,13 @@ export function SettingsModal({
                 onToggle={() =>
                   onGameplayChange({ cockpitDamageFx: !gameplaySettings.cockpitDamageFx })
                 }
+              />
+
+              <ToggleRow
+                label="Tutorial de Controles"
+                sublabel="Exibir guia ao iniciar a missão"
+                checked={tutorialEnabled}
+                onToggle={onToggleTutorialEnabled}
               />
             </div>
           </section>

@@ -60,6 +60,6 @@ export const LORE_ENTRIES: LoreEntry[] = [
     classification: 'Drone Articulado · Conduto Turquesa',
     summary:
       'Formado por dois cascos crescentes acoplados a um núcleo de engrenagens celestes. Quando sua estrutura colapsa, as metades se separam em dois batedores velozes.',
-    imageSrc: '/src/assets/images/solaris_enemy_splitter_1795181300379.jpg',
+    imageSrc: '/src/assets/images/solaris_enemy_splitter.png',
   },
 ];
