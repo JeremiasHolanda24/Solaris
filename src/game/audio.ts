@@ -11,7 +11,7 @@ export interface AudioSettings {
 export const DEFAULT_AUDIO_SETTINGS: AudioSettings = {
   master: 1,
   sfx: 0.9,
-  voice: 0.95,
+  voice: 0.5,
   ui: 0.85,
 };
 

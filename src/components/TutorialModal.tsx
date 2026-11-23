@@ -1,8 +1,15 @@
 import { Check, Crosshair, Move, ShieldPlus, Sparkles, Zap } from 'lucide-react';
+import {
+  DEFAULT_GAMEPLAY_SETTINGS,
+  GameplaySettings,
+  formatBindingPair,
+  formatMovementLabel,
+} from '../game/types';
 
 interface TutorialModalProps {
   open: boolean;
   isTouch: boolean;
+  gameplaySettings?: GameplaySettings;
   disableFutureTutorial: boolean;
   onToggleDisableFuture: () => void;
   onConfirm: () => void;
@@ -12,12 +19,20 @@ interface TutorialModalProps {
 export function TutorialModal({
   open,
   isTouch,
+  gameplaySettings = DEFAULT_GAMEPLAY_SETTINGS,
   disableFutureTutorial,
   onToggleDisableFuture,
   onConfirm,
   onHover,
 }: TutorialModalProps) {
   if (!open) return null;
+
+  const { mobileControls, keyboardControls } = gameplaySettings;
+  const moveSide = mobileControls.movePos.x < 0.5 ? 'esquerda' : 'direita';
+  const aimSide = mobileControls.aimPos.x < 0.5 ? 'esquerda' : 'direita';
+  const moveKeysLabel = formatMovementLabel(keyboardControls);
+  const shootKeysLabel = formatBindingPair(keyboardControls.shoot);
+  const dashKeysLabel = formatBindingPair(keyboardControls.dash);
 
   return (
     <div
@@ -55,8 +70,8 @@ export function TutorialModal({
                 <div className="text-xs font-semibold text-[#F4EFE6]">Mover a Nave</div>
                 <p className="mt-0.5 text-[11px] leading-relaxed text-[#F4EFE6]/70">
                   {isTouch
-                    ? 'Arraste o polegar na metade esquerda da tela para pilotar.'
-                    : 'Use WASD ou as Setas para manobrar pela arena.'}
+                    ? `Arraste o polegar na metade ${moveSide} da tela para pilotar.`
+                    : `Use ${moveKeysLabel} para manobrar pela arena.`}
                 </p>
               </div>
             </div>
@@ -67,8 +82,8 @@ export function TutorialModal({
                 <div className="text-xs font-semibold text-[#F4EFE6]">Mirar e Disparar</div>
                 <p className="mt-0.5 text-[11px] leading-relaxed text-[#F4EFE6]/70">
                   {isTouch
-                    ? 'Arraste na metade direita para mirar e atirar automaticamente.'
-                    : 'Mire com o Mouse e segure Clique Esquerdo ou Espaço para disparar.'}
+                    ? `Arraste na metade ${aimSide} para mirar e atirar automaticamente.`
+                    : `Mire com o Mouse e segure ${shootKeysLabel} para disparar.`}
                 </p>
               </div>
             </div>
@@ -80,7 +95,7 @@ export function TutorialModal({
                 <p className="mt-0.5 text-[11px] leading-relaxed text-[#F4EFE6]/70">
                   {isTouch
                     ? 'Toque no botão Impulso para atravessar ataques com invulnerabilidade.'
-                    : 'Pressione Shift ou Clique Direito para esquivar com invulnerabilidade.'}
+                    : `Pressione ${dashKeysLabel} para esquivar com invulnerabilidade.`}
                 </p>
               </div>
             </div>

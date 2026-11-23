@@ -18,10 +18,80 @@ import { TutorialModal } from './components/TutorialModal';
 import { LORE_ENTRIES } from './data/lore';
 import { AudioSettings, DEFAULT_AUDIO_SETTINGS, GameAudio } from './game/audio';
 import { SolarisEngine } from './game/engine';
-import { DEFAULT_GAMEPLAY_SETTINGS, GameplaySettings, HudSnapshot } from './game/types';
+import {
+  DEFAULT_GAMEPLAY_SETTINGS,
+  DEFAULT_KEYBOARD_CONTROL_SETTINGS,
+  DEFAULT_MOBILE_CONTROL_SETTINGS,
+  GameplaySettings,
+  HudSnapshot,
+  KeyBindingSlot,
+  KeyboardControlSettings,
+  MobileControlSettings,
+  TouchPoint,
+  formatBindingPair,
+  formatMovementLabel,
+} from './game/types';
+
+export type GameplaySettingsPatch = Partial<
+  Omit<GameplaySettings, 'mobileControls' | 'keyboardControls'>
+> & {
+  mobileControls?: Partial<MobileControlSettings>;
+  keyboardControls?: Partial<KeyboardControlSettings>;
+};
 
 const GAMEPLAY_SETTINGS_KEY = 'solaris_gameplay_settings_v1';
 const TUTORIAL_DISABLED_KEY = 'solaris_tutorial_disabled_v1';
+
+function clampRange(value: unknown, min: number, max: number, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, value));
+}
+
+function sanitizeTouchPoint(raw: unknown, fallback: TouchPoint): TouchPoint {
+  if (!raw || typeof raw !== 'object') return { ...fallback };
+  const p = raw as Partial<TouchPoint>;
+  return {
+    x: clampRange(p.x, 0.06, 0.94, fallback.x),
+    y: clampRange(p.y, 0.18, 0.9, fallback.y),
+  };
+}
+
+function sanitizeKeySlot(raw: unknown, fallback: KeyBindingSlot): KeyBindingSlot {
+  if (!raw || typeof raw !== 'object') return { ...fallback };
+  const s = raw as Partial<KeyBindingSlot>;
+  return {
+    primary: typeof s.primary === 'string' ? s.primary : fallback.primary,
+    secondary: typeof s.secondary === 'string' ? s.secondary : fallback.secondary,
+  };
+}
+
+function cloneDefaultGameplaySettings(): GameplaySettings {
+  return {
+    screenShake: DEFAULT_GAMEPLAY_SETTINGS.screenShake,
+    hudScale: DEFAULT_GAMEPLAY_SETTINGS.hudScale,
+    offscreenIndicators: DEFAULT_GAMEPLAY_SETTINGS.offscreenIndicators,
+    cockpitDamageFx: DEFAULT_GAMEPLAY_SETTINGS.cockpitDamageFx,
+    mobileControls: {
+      movePos: { ...DEFAULT_MOBILE_CONTROL_SETTINGS.movePos },
+      aimPos: { ...DEFAULT_MOBILE_CONTROL_SETTINGS.aimPos },
+      dashPos: { ...DEFAULT_MOBILE_CONTROL_SETTINGS.dashPos },
+      stickScale: DEFAULT_MOBILE_CONTROL_SETTINGS.stickScale,
+      dashScale: DEFAULT_MOBILE_CONTROL_SETTINGS.dashScale,
+      fixedSticks: DEFAULT_MOBILE_CONTROL_SETTINGS.fixedSticks,
+      opacity: DEFAULT_MOBILE_CONTROL_SETTINGS.opacity,
+    },
+    keyboardControls: {
+      moveUp: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.moveUp },
+      moveDown: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.moveDown },
+      moveLeft: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.moveLeft },
+      moveRight: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.moveRight },
+      shoot: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.shoot },
+      dash: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.dash },
+      pause: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.pause },
+      mute: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.mute },
+    },
+  };
+}
 
 function loadTutorialDisabled(): boolean {
   try {
@@ -32,26 +102,63 @@ function loadTutorialDisabled(): boolean {
 }
 
 function loadGameplaySettings(): GameplaySettings {
+  const defaults = cloneDefaultGameplaySettings();
   try {
     const raw = localStorage.getItem(GAMEPLAY_SETTINGS_KEY);
-    if (!raw) return { ...DEFAULT_GAMEPLAY_SETTINGS };
-    const parsed = JSON.parse(raw) as Partial<GameplaySettings>;
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw) as Partial<GameplaySettings> & {
+      mobileControls?: Partial<MobileControlSettings>;
+      keyboardControls?: Partial<KeyboardControlSettings>;
+    };
+    const rawMobile = parsed.mobileControls;
+    const rawKb = parsed.keyboardControls;
+
     return {
-      screenShake:
-        typeof parsed.screenShake === 'number' && Number.isFinite(parsed.screenShake)
-          ? Math.max(0, Math.min(1, parsed.screenShake))
-          : DEFAULT_GAMEPLAY_SETTINGS.screenShake,
+      screenShake: clampRange(parsed.screenShake, 0, 1, defaults.screenShake),
+      hudScale: clampRange(parsed.hudScale, 0.7, 1.5, defaults.hudScale),
       offscreenIndicators:
         typeof parsed.offscreenIndicators === 'boolean'
           ? parsed.offscreenIndicators
-          : DEFAULT_GAMEPLAY_SETTINGS.offscreenIndicators,
+          : defaults.offscreenIndicators,
       cockpitDamageFx:
         typeof parsed.cockpitDamageFx === 'boolean'
           ? parsed.cockpitDamageFx
-          : DEFAULT_GAMEPLAY_SETTINGS.cockpitDamageFx,
+          : defaults.cockpitDamageFx,
+      mobileControls: {
+        movePos: sanitizeTouchPoint(rawMobile?.movePos, defaults.mobileControls.movePos),
+        aimPos: sanitizeTouchPoint(rawMobile?.aimPos, defaults.mobileControls.aimPos),
+        dashPos: sanitizeTouchPoint(rawMobile?.dashPos, defaults.mobileControls.dashPos),
+        stickScale: clampRange(
+          rawMobile?.stickScale,
+          0.65,
+          1.45,
+          defaults.mobileControls.stickScale
+        ),
+        dashScale: clampRange(
+          rawMobile?.dashScale,
+          0.75,
+          1.45,
+          defaults.mobileControls.dashScale
+        ),
+        fixedSticks:
+          typeof rawMobile?.fixedSticks === 'boolean'
+            ? rawMobile.fixedSticks
+            : defaults.mobileControls.fixedSticks,
+        opacity: clampRange(rawMobile?.opacity, 0.35, 1.0, defaults.mobileControls.opacity),
+      },
+      keyboardControls: {
+        moveUp: sanitizeKeySlot(rawKb?.moveUp, defaults.keyboardControls.moveUp),
+        moveDown: sanitizeKeySlot(rawKb?.moveDown, defaults.keyboardControls.moveDown),
+        moveLeft: sanitizeKeySlot(rawKb?.moveLeft, defaults.keyboardControls.moveLeft),
+        moveRight: sanitizeKeySlot(rawKb?.moveRight, defaults.keyboardControls.moveRight),
+        shoot: sanitizeKeySlot(rawKb?.shoot, defaults.keyboardControls.shoot),
+        dash: sanitizeKeySlot(rawKb?.dash, defaults.keyboardControls.dash),
+        pause: sanitizeKeySlot(rawKb?.pause, defaults.keyboardControls.pause),
+        mute: sanitizeKeySlot(rawKb?.mute, defaults.keyboardControls.mute),
+      },
     };
   } catch {
-    return { ...DEFAULT_GAMEPLAY_SETTINGS };
+    return defaults;
   }
 }
 
@@ -116,6 +223,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const settingsAutoPausedRef = useRef(false);
   const portraitAutoPausedRef = useRef(false);
+  const isCapturingKeyRef = useRef(false);
   const [isTouch, setIsTouch] = useState<boolean>(detectTouchDevice);
   const [needsLandscape, setNeedsLandscape] = useState<boolean>(checkNeedsLandscape);
   const [isPreview] = useState<boolean>(detectPreviewIframe);
@@ -211,12 +319,28 @@ export default function App() {
     setAudioSettings(updated);
   }, []);
 
-  const handleGameplaySettingsChange = useCallback((partial: Partial<GameplaySettings>) => {
-    if (partial.offscreenIndicators !== undefined || partial.cockpitDamageFx !== undefined) {
+  const handleGameplaySettingsChange = useCallback((partial: GameplaySettingsPatch) => {
+    if (
+      partial.offscreenIndicators !== undefined ||
+      partial.cockpitDamageFx !== undefined ||
+      partial.mobileControls?.fixedSticks !== undefined ||
+      partial.keyboardControls !== undefined
+    ) {
       audioRef.current?.playUiClick('tab');
     }
     setGameplaySettings((prev) => {
-      const next = { ...prev, ...partial };
+      const next: GameplaySettings = {
+        ...prev,
+        ...partial,
+        mobileControls: {
+          ...prev.mobileControls,
+          ...(partial.mobileControls ?? {}),
+        },
+        keyboardControls: {
+          ...prev.keyboardControls,
+          ...(partial.keyboardControls ?? {}),
+        },
+      };
       engineRef.current?.setGameplaySettings(next);
       try {
         localStorage.setItem(GAMEPLAY_SETTINGS_KEY, JSON.stringify(next));
@@ -243,7 +367,7 @@ export default function App() {
       const nextAudio = audioRef.current.updateSettings(DEFAULT_AUDIO_SETTINGS);
       setAudioSettings(nextAudio);
     }
-    const nextGameplay = { ...DEFAULT_GAMEPLAY_SETTINGS };
+    const nextGameplay = cloneDefaultGameplaySettings();
     setGameplaySettings(nextGameplay);
     engineRef.current?.setGameplaySettings(nextGameplay);
     tutorialDisabledRef.current = false;
@@ -294,18 +418,45 @@ export default function App() {
     engineRef.current?.triggerDash();
   }, []);
 
+  const handlePlayTabSound = useCallback(() => {
+    audioRef.current?.playUiClick('tab');
+  }, []);
+
+  const handleCaptureKeyChange = useCallback((capturing: boolean) => {
+    isCapturingKeyRef.current = capturing;
+  }, []);
+
   useEffect(() => {
+    engineRef.current?.setInputSuspended(showSettings);
+  }, [showSettings]);
+
+  useEffect(() => {
+    const muteSlot = gameplaySettings.keyboardControls.mute;
+    const matchesMute = (code: string) =>
+      code !== '' && (muteSlot.primary === code || muteSlot.secondary === code);
+
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'KeyM') {
+      if (isCapturingKeyRef.current) return;
+      if (matchesMute(e.code)) {
         handleToggleMute();
       } else if (e.code === 'Escape' && showSettings) {
         e.preventDefault();
         handleCloseSettings();
       }
     };
+    const onMouseDown = (e: MouseEvent) => {
+      if (isCapturingKeyRef.current) return;
+      if (matchesMute(`Mouse${e.button}`)) {
+        handleToggleMute();
+      }
+    };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handleToggleMute, handleCloseSettings, showSettings]);
+    window.addEventListener('mousedown', onMouseDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('mousedown', onMouseDown);
+    };
+  }, [gameplaySettings.keyboardControls.mute, handleToggleMute, handleCloseSettings, showSettings]);
 
   const handleStart = useCallback(() => {
     audioRef.current?.playUiClick('primary');
@@ -445,6 +596,17 @@ export default function App() {
   const dashCircumference = 2 * Math.PI * dashRadius;
   const dashOffset = dashCircumference * (1 - Math.max(0, Math.min(1, hud.dashReadyRatio)));
 
+  const { mobileControls, keyboardControls, hudScale } = gameplaySettings;
+  const moveSideCap = mobileControls.movePos.x < 0.5 ? 'Esquerda' : 'Direita';
+  const aimSideCap = mobileControls.aimPos.x < 0.5 ? 'Esquerda' : 'Direita';
+  const moveSideLower = moveSideCap.toLowerCase();
+  const aimSideLower = aimSideCap.toLowerCase();
+  const desktopHintLine = `${formatMovementLabel(keyboardControls)} Mover · ${formatBindingPair(
+    keyboardControls.shoot
+  )} Disparar · ${formatBindingPair(keyboardControls.dash)} Impulso · ${formatBindingPair(
+    keyboardControls.pause
+  )} Pausar · ${formatBindingPair(keyboardControls.mute)} Som`;
+
   return (
     <div className="fixed inset-0 overflow-hidden bg-[#0B1320]">
       <div className="relative h-[100dvh] w-screen overflow-hidden bg-[#0B1320] text-[#F4EFE6]">
@@ -529,8 +691,8 @@ export default function App() {
           <div className="relative z-10 flex items-center justify-between text-[11px] sm:text-xs text-[#F4EFE6]/65">
             <p className="tracking-wide">
               {isTouch
-                ? 'Esquerda Mover · Direita Mirar/Disparar · Botão Impulso'
-                : 'WASD Mover · Mouse/Espaço Disparar · Shift Impulso · Esc Pausar · M Som'}
+                ? `${moveSideCap} Mover · ${aimSideCap} Mirar/Disparar · Botão Impulso`
+                : desktopHintLine}
             </p>
           </div>
         </div>
@@ -570,19 +732,22 @@ export default function App() {
           {/* Top Perimeter HUD (3-column grid keeps Wave & Overdrive mathematically centered, never remounted on damage) */}
           <div className="grid grid-cols-3 items-start gap-2 sm:gap-4">
             {/* Top-Left: Score & Combo */}
-            <div className="justify-self-start flex flex-col gap-1 min-w-0">
-              <div className="flex items-baseline gap-2 sm:gap-3">
-                <span className="font-mono text-xl sm:text-3xl font-semibold tracking-tight text-[#F4EFE6] tabular-nums">
+            <div
+              className="justify-self-start flex flex-col gap-1 min-w-0 max-w-full"
+              style={{ zoom: hudScale }}
+            >
+              <div className="flex items-baseline gap-2 sm:gap-3 min-w-0 max-w-full">
+                <span className="font-mono text-xl sm:text-3xl font-semibold tracking-tight text-[#F4EFE6] tabular-nums truncate">
                   {hud.score.toLocaleString('pt-BR')}
                 </span>
                 {hud.combo > 1 && (
-                  <span className="font-mono text-xs sm:text-sm font-semibold text-[#E8B84B] tabular-nums">
+                  <span className="shrink-0 font-mono text-xs sm:text-sm font-semibold text-[#E8B84B] tabular-nums">
                     x{hud.combo}
                   </span>
                 )}
               </div>
 
-              <div className="h-0.5 w-20 sm:w-28 overflow-hidden bg-[#F4EFE6]/10">
+              <div className="h-0.5 w-20 sm:w-28 max-w-full overflow-hidden bg-[#F4EFE6]/10">
                 <div
                   className="h-full origin-left bg-[#E8B84B] transition-transform duration-75"
                   style={{ transform: `scaleX(${hud.comboTimerRatio})` }}
@@ -590,21 +755,26 @@ export default function App() {
               </div>
 
               {hud.highScore > 0 && (
-                <div className="hidden sm:block text-xs text-[#F4EFE6]/55 tabular-nums">
+                <div className="hidden sm:block max-w-full truncate text-xs text-[#F4EFE6]/55 tabular-nums">
                   Recorde {hud.highScore.toLocaleString('pt-BR')}
                 </div>
               )}
             </div>
 
             {/* Top-Center: Wave & Overdrive */}
-            <div className="justify-self-center flex flex-col items-center gap-1 sm:gap-1.5">
-              <div className="flex items-center gap-1.5 sm:gap-2 text-[11px] sm:text-xs font-medium tracking-wide text-[#F4EFE6]/85 whitespace-nowrap">
-                <span className="font-display text-xs sm:text-sm text-[#E8B84B]">Onda {hud.wave}</span>
-                <span aria-hidden="true" className="hidden sm:inline text-[#E8B84B]/40">
+            <div
+              className="justify-self-center flex flex-col items-center gap-1 sm:gap-1.5 min-w-0 max-w-full"
+              style={{ zoom: hudScale }}
+            >
+              <div className="flex items-center justify-center gap-1.5 sm:gap-2 max-w-full min-w-0 text-[11px] sm:text-xs font-medium tracking-wide text-[#F4EFE6]/85 whitespace-nowrap">
+                <span className="shrink-0 font-display text-xs sm:text-sm text-[#E8B84B]">
+                  Onda {hud.wave}
+                </span>
+                <span aria-hidden="true" className="hidden sm:inline shrink-0 text-[#E8B84B]/40">
                   ·
                 </span>
                 <span
-                  className={`hidden sm:inline ${
+                  className={`hidden sm:inline min-w-0 truncate ${
                     hud.overdriveActive ? 'text-[#FF7B66] font-semibold' : 'text-[#F4EFE6]/65'
                   }`}
                 >
@@ -612,7 +782,7 @@ export default function App() {
                 </span>
               </div>
               <div
-                className={`h-1.5 w-24 sm:w-44 overflow-hidden rounded-xs bg-[#132035] border ${
+                className={`h-1.5 w-24 sm:w-44 max-w-full overflow-hidden rounded-xs bg-[#132035] border ${
                   hud.overdriveActive ? 'border-[#FF7B66]/70' : 'border-[#E8B84B]/25'
                 }`}
               >
@@ -626,28 +796,36 @@ export default function App() {
               {warningActive && (
                 <div
                   role="status"
-                  className={`mt-0.5 flex items-center gap-1.5 font-mono text-[10px] sm:text-[11px] font-semibold tracking-wider whitespace-nowrap ${
+                  className={`mt-0.5 flex items-center justify-center gap-1.5 max-w-full min-w-0 font-mono text-[10px] sm:text-[11px] font-semibold tracking-wider whitespace-nowrap ${
                     hud.hp === 1
                       ? 'text-[#FF6B5A] animate-warning-pulse-fast'
                       : 'text-[#FFB347] animate-warning-pulse-slow'
                   }`}
                 >
                   <span
-                    className={`h-2 w-2 rounded-full ${
+                    className={`h-2 w-2 shrink-0 rounded-full ${
                       hud.hp === 1 ? 'bg-[#FF4B3A]' : 'bg-[#FF9F43]'
                     }`}
                     aria-hidden="true"
                   />
-                  <span>{hud.hp === 1 ? 'WARNING · CASCO CRÍTICO' : 'CAUTION · CASCO BAIXO'}</span>
+                  <span className="min-w-0 truncate">
+                    {hud.hp === 1 ? 'WARNING · CASCO CRÍTICO' : 'CAUTION · CASCO BAIXO'}
+                  </span>
                 </div>
               )}
             </div>
 
             {/* Top-Right: Shields + Progressive Repair Indicator + Audio/Pause controls (>= 44px touch targets on mobile) */}
-            <div className="justify-self-end flex items-center gap-2 sm:gap-3">
-              <div className="flex flex-col items-end gap-1">
-                <div className="flex items-center gap-1.5" aria-label={`Escudos: ${hud.hp} de ${hud.maxHp}`}>
-                  <div className="flex items-center gap-1">
+            <div className="justify-self-end flex flex-wrap-reverse items-center justify-end gap-2 sm:gap-3 min-w-0 max-w-full">
+              <div
+                className="flex flex-col items-end gap-1 min-w-0 max-w-full"
+                style={{ zoom: hudScale }}
+              >
+                <div
+                  className="flex items-center gap-1.5 max-w-full"
+                  aria-label={`Escudos: ${hud.hp} de ${hud.maxHp}`}
+                >
+                  <div className="flex items-center gap-1 shrink-0">
                     {Array.from({ length: hud.maxHp }).map((_, idx) => {
                       const active = idx < hud.hp;
                       const flashing = hud.damageFlashRatio > 0.15;
@@ -725,7 +903,7 @@ export default function App() {
                     })}
                   </div>
                   <span
-                    className={`hidden sm:inline font-mono text-xs tabular-nums transition-colors duration-100 ${
+                    className={`hidden sm:inline shrink-0 font-mono text-xs tabular-nums transition-colors duration-100 ${
                       hud.damageFlashRatio > 0.15
                         ? 'text-[#FF7B66] font-semibold'
                         : hud.repairAnimRatio > 0.01
@@ -737,11 +915,11 @@ export default function App() {
                   </span>
                 </div>
                 {hud.repairAnimRatio > 0.01 && (
-                  <div className="flex items-center gap-1.5" role="status">
-                    <span className="font-mono text-[9px] sm:text-[10px] font-semibold tracking-wider text-[#7AE4FF]">
+                  <div className="flex items-center gap-1.5 max-w-full min-w-0" role="status">
+                    <span className="min-w-0 truncate font-mono text-[9px] sm:text-[10px] font-semibold tracking-wider text-[#7AE4FF]">
                       REPARANDO CASCO
                     </span>
-                    <div className="h-1 w-12 sm:w-16 overflow-hidden rounded-xs bg-[#0E2438] border border-[#5CE1FF]/35">
+                    <div className="h-1 w-12 sm:w-16 shrink-0 overflow-hidden rounded-xs bg-[#0E2438] border border-[#5CE1FF]/35">
                       <div
                         className="h-full origin-left bg-[#7AE4FF] transition-transform duration-75"
                         style={{
@@ -753,13 +931,15 @@ export default function App() {
                 )}
               </div>
 
-              <div className="pointer-events-auto flex items-center gap-1.5">
+              <div className="pointer-events-auto flex items-center gap-1.5 shrink-0">
                 <button
                   type="button"
                   onClick={handleOpenSettings}
                   onMouseEnter={playHover}
                   aria-label="Configurações"
-                  className="group flex h-11 w-11 sm:h-9 sm:w-9 items-center justify-center rounded-md border border-[#E8B84B]/25 bg-[#0B1320]/80 text-[#F4EFE6]/85 transition-colors duration-150 hover:border-[#E8B84B] hover:text-[#E8B84B] cursor-pointer"
+                  className={`group flex items-center justify-center rounded-md border border-[#E8B84B]/25 bg-[#0B1320]/80 text-[#F4EFE6]/85 transition-colors duration-150 hover:border-[#E8B84B] hover:text-[#E8B84B] cursor-pointer ${
+                    isTouch ? 'h-11 w-11' : 'h-11 w-11 sm:h-9 sm:w-9'
+                  }`}
                 >
                   <Settings className="h-4 w-4 transition-transform duration-200 group-hover:rotate-45" />
                 </button>
@@ -768,7 +948,9 @@ export default function App() {
                   onClick={handleTogglePause}
                   onMouseEnter={playHover}
                   aria-label={isPaused ? 'Continuar' : 'Pausar'}
-                  className="flex h-11 w-11 sm:h-9 sm:w-9 items-center justify-center rounded-md border border-[#E8B84B]/25 bg-[#0B1320]/80 text-[#F4EFE6]/85 transition-colors duration-150 hover:border-[#E8B84B] hover:text-[#E8B84B] cursor-pointer"
+                  className={`flex items-center justify-center rounded-md border border-[#E8B84B]/25 bg-[#0B1320]/80 text-[#F4EFE6]/85 transition-colors duration-150 hover:border-[#E8B84B] hover:text-[#E8B84B] cursor-pointer ${
+                    isTouch ? 'h-11 w-11' : 'h-11 w-11 sm:h-9 sm:w-9'
+                  }`}
                 >
                   {isPaused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
                 </button>
@@ -778,8 +960,8 @@ export default function App() {
 
           {/* Non-blocking Wave Transition Banner */}
           {hud.waveBanner && isPlaying && (
-            <div className="self-center text-center">
-              <div className="font-display text-2xl sm:text-3xl tracking-[0.22em] text-[#E8B84B]">
+            <div className="self-center text-center max-w-full px-2" style={{ zoom: hudScale }}>
+              <div className="font-display text-2xl sm:text-3xl tracking-[0.22em] text-[#E8B84B] truncate">
                 {hud.waveBanner}
               </div>
             </div>
@@ -787,14 +969,23 @@ export default function App() {
 
           {/* Mobile Thumb-Zone Controls (Only shown on touch devices during active play) */}
           {isTouch && isPlaying ? (
-            <div className="flex items-end justify-between pb-1">
-              {/* Left thumb subtle guide */}
-              <div className="pl-1 pb-2 text-[11px] tracking-wide text-[#F4EFE6]/35">
-                Esquerda mover · Direita mirar
-              </div>
+            <>
+              {!mobileControls.fixedSticks && (
+                <div className="flex items-end justify-between pb-1">
+                  <div className="pl-1 pb-2 text-[11px] tracking-wide text-[#F4EFE6]/35">
+                    {moveSideCap} mover · {aimSideLower} mirar
+                  </div>
+                </div>
+              )}
 
-              {/* Right thumb action: Dash button */}
-              <div className="pointer-events-auto flex items-end pr-1">
+              <div
+                className="pointer-events-auto absolute -translate-x-1/2 -translate-y-1/2"
+                style={{
+                  left: `${mobileControls.dashPos.x * 100}%`,
+                  top: `${mobileControls.dashPos.y * 100}%`,
+                  opacity: mobileControls.opacity,
+                }}
+              >
                 <button
                   type="button"
                   onTouchStart={(e) => {
@@ -804,6 +995,9 @@ export default function App() {
                   }}
                   onClick={handleDashPress}
                   aria-label="Impulso"
+                  style={{
+                    transform: `scale(${mobileControls.dashScale})`,
+                  }}
                   className={`relative flex h-16 w-16 flex-col items-center justify-center rounded-full border transition-transform duration-100 active:scale-95 cursor-pointer ${
                     dashReady
                       ? 'border-[#E8B84B] bg-[#132035]/90 text-[#E8B84B]'
@@ -839,7 +1033,7 @@ export default function App() {
                   <span className="mt-0.5 text-[10px] font-medium tracking-wide">Impulso</span>
                 </button>
               </div>
-            </div>
+            </>
           ) : (
             <div />
           )}
@@ -1055,6 +1249,7 @@ export default function App() {
       <TutorialModal
         open={showTutorial}
         isTouch={isTouch}
+        gameplaySettings={gameplaySettings}
         disableFutureTutorial={disableFutureTutorial}
         onToggleDisableFuture={handleToggleDisableFutureTutorial}
         onConfirm={handleConfirmTutorial}
@@ -1078,6 +1273,8 @@ export default function App() {
         onResetDefaults={handleResetSettings}
         onClose={handleCloseSettings}
         onHover={playHover}
+        onPlayTabSound={handlePlayTabSound}
+        onCaptureKeyChange={handleCaptureKeyChange}
       />
 
       {/* ROTATE TO LANDSCAPE PROMPT */}

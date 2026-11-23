@@ -2,11 +2,17 @@ import playerFrontSpriteUrl from '../assets/images/solaris_cockpit_closeup.png';
 import { GameAudio } from './audio';
 import {
   Bullet,
+  DEFAULT_KEYBOARD_CONTROL_SETTINGS,
+  DEFAULT_MOBILE_CONTROL_SETTINGS,
   Enemy,
   EnemyType,
   FloatingText,
   GameState,
+  GameplaySettings,
   HudSnapshot,
+  KeyBindingSlot,
+  KeyboardControlSettings,
+  MobileControlSettings,
   Particle,
   ParticleKind,
   Shockwave,
@@ -21,7 +27,6 @@ const ENEMY_POOL_SIZE = 64;
 const BULLET_POOL_SIZE = 160;
 const SPARK_POOL_SIZE = 96;
 const FLOATING_TEXT_POOL_SIZE = 48;
-const BASTION_SPREAD = [-0.26, 0, 0.26] as const;
 
 const SPRITE_URLS = {
   PLAYER: '/src/assets/images/solaris_player_ship_1795180787643.jpg',
@@ -143,15 +148,20 @@ export class SolarisEngine {
   };
 
   // Input state
-  private heldKeys = new Set<string>();
+  private heldInputs = new Set<string>();
+  private inputSuspended = false;
   private mouseX = 640;
   private mouseY = 360;
-  private mouseDown = false;
   private mouseMovedRecently = false;
 
   // Touch twin-stick state
   private touchMode = false;
-  private readonly stickMaxRadius = 56;
+  private readonly isTouchDevice =
+    typeof window !== 'undefined' &&
+    ('ontouchstart' in window ||
+      navigator.maxTouchPoints > 0 ||
+      window.matchMedia?.('(pointer: coarse)').matches);
+  private readonly stickBaseRadius = 56;
   private moveTouch: {
     id: number;
     originX: number;
@@ -202,6 +212,25 @@ export class SolarisEngine {
   private hudSyncTimer = 0;
   private screenShakeScale = 1;
   private showOffscreenIndicators = true;
+  private mobileControls: MobileControlSettings = {
+    movePos: { ...DEFAULT_MOBILE_CONTROL_SETTINGS.movePos },
+    aimPos: { ...DEFAULT_MOBILE_CONTROL_SETTINGS.aimPos },
+    dashPos: { ...DEFAULT_MOBILE_CONTROL_SETTINGS.dashPos },
+    stickScale: DEFAULT_MOBILE_CONTROL_SETTINGS.stickScale,
+    dashScale: DEFAULT_MOBILE_CONTROL_SETTINGS.dashScale,
+    fixedSticks: DEFAULT_MOBILE_CONTROL_SETTINGS.fixedSticks,
+    opacity: DEFAULT_MOBILE_CONTROL_SETTINGS.opacity,
+  };
+  private keyboardControls: KeyboardControlSettings = {
+    moveUp: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.moveUp },
+    moveDown: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.moveDown },
+    moveLeft: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.moveLeft },
+    moveRight: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.moveRight },
+    shoot: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.shoot },
+    dash: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.dash },
+    pause: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.pause },
+    mute: { ...DEFAULT_KEYBOARD_CONTROL_SETTINGS.mute },
+  };
 
   // Cinematic Intro Cutscene state
   private cutsceneTime = 0;
@@ -239,6 +268,8 @@ export class SolarisEngine {
     { active: false, x: 0, y: 0, vx: 0, vy: 0, tx: 0, ty: 0 },
     { active: false, x: 0, y: 0, vx: 0, vy: 0, tx: 0, ty: 0 },
   ];
+  private cutsceneTrail: Array<{ x: number; y: number }> = [];
+  private cutsceneTrailTimer = 0;
 
   // Randomized per-match Combat Zone Scenery (guaranteed dispersed & non-overlapping)
   private combatNebula: {
@@ -986,6 +1017,10 @@ export class SolarisEngine {
     };
     this.cutsceneBolts[0].active = false;
     this.cutsceneBolts[1].active = false;
+    this.cutsceneTrail = [];
+    this.cutsceneTrailTimer = 0;
+    const initialAct1 = this.getAct1ShipMotion(0, w, h);
+    this.cutsceneTrail.push({ x: initialAct1.shipDrawX, y: initialAct1.shipDrawY });
 
     const specs: Array<{
       id: number;
@@ -1041,6 +1076,8 @@ export class SolarisEngine {
     this.cutsceneBolts[0].active = false;
     this.cutsceneBolts[1].active = false;
     this.cutsceneSquadron = [];
+    this.cutsceneTrail = [];
+    this.cutsceneTrailTimer = 0;
 
     this.player.x = this.width / 2;
     this.player.y = this.height / 2;
@@ -1084,6 +1121,8 @@ export class SolarisEngine {
     this.playerDetonated = false;
     this.hullHealProgress = 0;
     this.cutsceneSquadron = [];
+    this.cutsceneTrail = [];
+    this.cutsceneTrailTimer = 0;
     this.clearAllInputs();
     this.releaseAllEntities();
     this.waveBanner = null;
@@ -1215,10 +1254,31 @@ export class SolarisEngine {
   }
 
   private clearAllInputs(): void {
-    this.heldKeys.clear();
-    this.mouseDown = false;
+    this.heldInputs.clear();
     this.moveTouch = null;
     this.aimTouch = null;
+  }
+
+  public setInputSuspended(suspended: boolean): void {
+    this.inputSuspended = suspended;
+    if (suspended) {
+      this.clearAllInputs();
+    }
+  }
+
+  private matchesSlot(code: string, slot: KeyBindingSlot): boolean {
+    return code !== '' && (slot.primary === code || slot.secondary === code);
+  }
+
+  private isSlotHeld(slot: KeyBindingSlot): boolean {
+    return (
+      (slot.primary !== '' && this.heldInputs.has(slot.primary)) ||
+      (slot.secondary !== '' && this.heldInputs.has(slot.secondary))
+    );
+  }
+
+  private getStickRadius(): number {
+    return this.stickBaseRadius * this.mobileControls.stickScale;
   }
 
   private vibrate(pattern: number | number[]): void {
@@ -1238,9 +1298,32 @@ export class SolarisEngine {
     this.resize();
   }
 
-  public setGameplaySettings(settings: { screenShake: number; offscreenIndicators: boolean }): void {
+  public setGameplaySettings(settings: GameplaySettings): void {
     this.screenShakeScale = Math.max(0, Math.min(1, settings.screenShake));
     this.showOffscreenIndicators = settings.offscreenIndicators;
+    if (settings.mobileControls) {
+      this.mobileControls = {
+        movePos: { ...settings.mobileControls.movePos },
+        aimPos: { ...settings.mobileControls.aimPos },
+        dashPos: { ...settings.mobileControls.dashPos },
+        stickScale: Math.max(0.65, Math.min(1.45, settings.mobileControls.stickScale)),
+        dashScale: Math.max(0.75, Math.min(1.45, settings.mobileControls.dashScale)),
+        fixedSticks: Boolean(settings.mobileControls.fixedSticks),
+        opacity: Math.max(0.35, Math.min(1, settings.mobileControls.opacity)),
+      };
+    }
+    if (settings.keyboardControls) {
+      this.keyboardControls = {
+        moveUp: { ...settings.keyboardControls.moveUp },
+        moveDown: { ...settings.keyboardControls.moveDown },
+        moveLeft: { ...settings.keyboardControls.moveLeft },
+        moveRight: { ...settings.keyboardControls.moveRight },
+        shoot: { ...settings.keyboardControls.shoot },
+        dash: { ...settings.keyboardControls.dash },
+        pause: { ...settings.keyboardControls.pause },
+        mute: { ...settings.keyboardControls.mute },
+      };
+    }
   }
 
   private toCanvasCoords(
@@ -1274,6 +1357,7 @@ export class SolarisEngine {
   };
 
   private handleKeyDown = (e: KeyboardEvent): void => {
+    if (this.inputSuspended) return;
     const code = e.code;
 
     if (
@@ -1286,7 +1370,7 @@ export class SolarisEngine {
       e.preventDefault();
     }
 
-    if (code === 'Escape' || code === 'KeyP') {
+    if (this.matchesSlot(code, this.keyboardControls.pause)) {
       if (this.tutorialActive) return;
       if (this.state === 'PLAYING' || this.state === 'PAUSED') {
         this.togglePause();
@@ -1312,17 +1396,17 @@ export class SolarisEngine {
     }
 
     if (this.state === 'PLAYING' && !this.playerDying) {
-      const wasHeld = this.heldKeys.has(code);
-      this.heldKeys.add(code);
+      const wasHeld = this.heldInputs.has(code);
+      this.heldInputs.add(code);
 
-      if (!wasHeld && (code === 'ShiftLeft' || code === 'ShiftRight')) {
+      if (!wasHeld && this.matchesSlot(code, this.keyboardControls.dash)) {
         this.player.dashBufferTimer = 0.14;
       }
     }
   };
 
   private handleKeyUp = (e: KeyboardEvent): void => {
-    this.heldKeys.delete(e.code);
+    this.heldInputs.delete(e.code);
   };
 
   private handleMouseMove = (e: MouseEvent): void => {
@@ -1334,6 +1418,18 @@ export class SolarisEngine {
   };
 
   private handleMouseDown = (e: MouseEvent): void => {
+    if (this.inputSuspended) return;
+    const mouseCode = `Mouse${e.button}`;
+
+    if (
+      this.matchesSlot(mouseCode, this.keyboardControls.pause) &&
+      !this.tutorialActive &&
+      (this.state === 'PLAYING' || this.state === 'PAUSED')
+    ) {
+      this.togglePause();
+      return;
+    }
+
     if (this.state !== 'PLAYING' || this.playerDying) return;
     this.audio.unlock();
     const rect = this.canvas.getBoundingClientRect();
@@ -1342,17 +1438,16 @@ export class SolarisEngine {
     this.mouseY = pt.y;
     this.mouseMovedRecently = true;
 
-    if (e.button === 0) {
-      this.mouseDown = true;
-    } else if (e.button === 2) {
+    const wasHeld = this.heldInputs.has(mouseCode);
+    this.heldInputs.add(mouseCode);
+
+    if (!wasHeld && this.matchesSlot(mouseCode, this.keyboardControls.dash)) {
       this.player.dashBufferTimer = 0.14;
     }
   };
 
   private handleMouseUp = (e: MouseEvent): void => {
-    if (e.button === 0) {
-      this.mouseDown = false;
-    }
+    this.heldInputs.delete(`Mouse${e.button}`);
   };
 
   private handleContextMenu = (e: MouseEvent): void => {
@@ -1369,30 +1464,95 @@ export class SolarisEngine {
     this.mouseMovedRecently = false;
 
     const rect = this.canvas.getBoundingClientRect();
+    const maxR = this.getStickRadius();
+    const moveOriginX = this.mobileControls.movePos.x * this.width;
+    const moveOriginY = this.mobileControls.movePos.y * this.height;
+    const aimOriginX = this.mobileControls.aimPos.x * this.width;
+    const aimOriginY = this.mobileControls.aimPos.y * this.height;
+
     for (let i = 0; i < e.changedTouches.length; i++) {
       const t = e.changedTouches[i];
       const { x: tx, y: ty } = this.toCanvasCoords(t.clientX, t.clientY, rect);
 
-      if (tx < this.width * 0.5 && this.moveTouch === null) {
-        this.moveTouch = {
-          id: t.identifier,
-          originX: tx,
-          originY: ty,
-          currX: tx,
-          currY: ty,
-          dx: 0,
-          dy: 0,
-        };
-      } else if (tx >= this.width * 0.5 && this.aimTouch === null) {
-        this.aimTouch = {
-          id: t.identifier,
-          originX: tx,
-          originY: ty,
-          currX: tx,
-          currY: ty,
-          dx: 0,
-          dy: 0,
-        };
+      if (this.mobileControls.fixedSticks) {
+        const dMove = Math.hypot(tx - moveOriginX, ty - moveOriginY);
+        const dAim = Math.hypot(tx - aimOriginX, ty - aimOriginY);
+        let assignMove = false;
+        let assignAim = false;
+
+        if (this.moveTouch === null && this.aimTouch === null) {
+          if (dMove <= dAim) assignMove = true;
+          else assignAim = true;
+        } else if (this.moveTouch === null) {
+          assignMove = true;
+        } else if (this.aimTouch === null) {
+          assignAim = true;
+        }
+
+        if (assignMove) {
+          const rawX = tx - moveOriginX;
+          const rawY = ty - moveOriginY;
+          const dist = Math.hypot(rawX, rawY);
+          const clamped = Math.min(dist, maxR);
+          const angle = Math.atan2(rawY, rawX);
+          this.moveTouch = {
+            id: t.identifier,
+            originX: moveOriginX,
+            originY: moveOriginY,
+            currX: dist > 0 ? moveOriginX + Math.cos(angle) * clamped : moveOriginX,
+            currY: dist > 0 ? moveOriginY + Math.sin(angle) * clamped : moveOriginY,
+            dx: dist > 6 ? (Math.cos(angle) * clamped) / maxR : 0,
+            dy: dist > 6 ? (Math.sin(angle) * clamped) / maxR : 0,
+          };
+        } else if (assignAim) {
+          const rawX = tx - aimOriginX;
+          const rawY = ty - aimOriginY;
+          const dist = Math.hypot(rawX, rawY);
+          const clamped = Math.min(dist, maxR);
+          const angle = Math.atan2(rawY, rawX);
+          this.aimTouch = {
+            id: t.identifier,
+            originX: aimOriginX,
+            originY: aimOriginY,
+            currX: dist > 0 ? aimOriginX + Math.cos(angle) * clamped : aimOriginX,
+            currY: dist > 0 ? aimOriginY + Math.sin(angle) * clamped : aimOriginY,
+            dx: dist > 8 ? Math.cos(angle) : 0,
+            dy: dist > 8 ? Math.sin(angle) : 0,
+          };
+        }
+      } else {
+        const moveLeftAimRight =
+          this.mobileControls.movePos.x < 0.5 && this.mobileControls.aimPos.x >= 0.5;
+        const aimLeftMoveRight =
+          this.mobileControls.movePos.x >= 0.5 && this.mobileControls.aimPos.x < 0.5;
+        const prefersMove = moveLeftAimRight
+          ? tx < this.width * 0.5
+          : aimLeftMoveRight
+            ? tx >= this.width * 0.5
+            : Math.hypot(tx - moveOriginX, ty - moveOriginY) <=
+              Math.hypot(tx - aimOriginX, ty - aimOriginY);
+
+        if (prefersMove && this.moveTouch === null) {
+          this.moveTouch = {
+            id: t.identifier,
+            originX: tx,
+            originY: ty,
+            currX: tx,
+            currY: ty,
+            dx: 0,
+            dy: 0,
+          };
+        } else if (!prefersMove && this.aimTouch === null) {
+          this.aimTouch = {
+            id: t.identifier,
+            originX: tx,
+            originY: ty,
+            currX: tx,
+            currY: ty,
+            dx: 0,
+            dy: 0,
+          };
+        }
       }
     }
   };
@@ -1401,7 +1561,7 @@ export class SolarisEngine {
     if (this.state !== 'PLAYING' || this.playerDying) return;
     e.preventDefault();
     const rect = this.canvas.getBoundingClientRect();
-    const maxR = this.stickMaxRadius;
+    const maxR = this.getStickRadius();
 
     for (let i = 0; i < e.changedTouches.length; i++) {
       const t = e.changedTouches[i];
@@ -2157,10 +2317,11 @@ export class SolarisEngine {
     // Movement vector (keyboard + analog virtual left stick)
     let ix = 0;
     let iy = 0;
-    if (this.heldKeys.has('KeyW') || this.heldKeys.has('ArrowUp')) iy -= 1;
-    if (this.heldKeys.has('KeyS') || this.heldKeys.has('ArrowDown')) iy += 1;
-    if (this.heldKeys.has('KeyA') || this.heldKeys.has('ArrowLeft')) ix -= 1;
-    if (this.heldKeys.has('KeyD') || this.heldKeys.has('ArrowRight')) ix += 1;
+    const kb = this.keyboardControls;
+    if (this.isSlotHeld(kb.moveUp)) iy -= 1;
+    if (this.isSlotHeld(kb.moveDown)) iy += 1;
+    if (this.isSlotHeld(kb.moveLeft)) ix -= 1;
+    if (this.isSlotHeld(kb.moveRight)) ix += 1;
 
     if (this.moveTouch) {
       ix += this.moveTouch.dx;
@@ -2263,7 +2424,7 @@ export class SolarisEngine {
     }
 
     // Manual shooting
-    const wantsFire = this.mouseDown || this.heldKeys.has('Space') || this.aimTouch !== null;
+    const wantsFire = this.isSlotHeld(this.keyboardControls.shoot) || this.aimTouch !== null;
     if (wantsFire && p.fireTimer <= 0) {
       const isOverdrive = p.overdriveTimer > 0;
       p.fireTimer = isOverdrive ? 0.115 : 0.155;
@@ -2447,22 +2608,19 @@ export class SolarisEngine {
         } else if (e.aiState === 'WINDUP') {
           e.aiTimer -= dt;
           if (e.aiTimer <= 0) {
-            const orbSpeed = 245 * Math.min(1.32, speedMult);
-            for (let s = 0; s < BASTION_SPREAD.length; s++) {
-              const a = angleToPlayer + BASTION_SPREAD[s];
-              this.spawnBullet(
-                e.x + Math.cos(a) * e.radius,
-                e.y + Math.sin(a) * e.radius,
-                Math.cos(a) * orbSpeed,
-                Math.sin(a) * orbSpeed,
-                5.5,
-                1,
-                false,
-                3.4,
-                PALETTE.coralBright
-              );
-            }
-            this.spawnShockwave(e.x, e.y, 44, PALETTE.coral, 2, 0.25, false);
+            const orbSpeed = 215 * Math.min(1.32, speedMult);
+            this.spawnBullet(
+              e.x + Math.cos(angleToPlayer) * e.radius,
+              e.y + Math.sin(angleToPlayer) * e.radius,
+              Math.cos(angleToPlayer) * orbSpeed,
+              Math.sin(angleToPlayer) * orbSpeed,
+              14,
+              1,
+              false,
+              3.6,
+              PALETTE.coralBright
+            );
+            this.spawnShockwave(e.x, e.y, 58, PALETTE.coral, 2, 0.25, false);
             e.aiState = 'APPROACH';
             e.aiTimer = (highIntensity ? 1.65 : 2.25) + Math.random() * 0.85;
           }
@@ -3008,7 +3166,11 @@ export class SolarisEngine {
       if (this.mouseMovedRecently && !this.touchMode) {
         this.renderReticle(ctx);
       }
-      if (this.moveTouch || this.aimTouch) {
+      if (
+        this.moveTouch ||
+        this.aimTouch ||
+        (this.mobileControls.fixedSticks && (this.touchMode || this.isTouchDevice))
+      ) {
         this.renderTouchSticks(ctx);
       }
     } else if (this.playerDying && !this.playerDetonated) {
@@ -4424,6 +4586,22 @@ export class SolarisEngine {
         ctx.roundRect(-3, -1.2, 9, 2.4, 1.2);
         ctx.fill();
       } else {
+        if (b.radius >= 10) {
+          const pulse = 1 + Math.sin(this.ambientTime * 11 + b.x * 0.04) * 0.09;
+          const glowRadius = b.radius * 2 * pulse;
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          const grad = ctx.createRadialGradient(0, 0, b.radius * 0.25, 0, 0, glowRadius);
+          grad.addColorStop(0, 'rgba(255, 123, 102, 0.58)');
+          grad.addColorStop(0.55, 'rgba(232, 93, 74, 0.24)');
+          grad.addColorStop(1, 'rgba(232, 93, 74, 0)');
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(0, 0, glowRadius, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+
         ctx.fillStyle = b.color;
         ctx.beginPath();
         ctx.arc(0, 0, b.radius, 0, Math.PI * 2);
@@ -4432,6 +4610,15 @@ export class SolarisEngine {
         ctx.beginPath();
         ctx.arc(0, 0, b.radius * 0.45, 0, Math.PI * 2);
         ctx.fill();
+
+        if (b.radius >= 10) {
+          const ringPulse = 1 + Math.sin(this.ambientTime * 11 + b.x * 0.04) * 0.09;
+          ctx.strokeStyle = 'rgba(255, 196, 178, 0.72)';
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.arc(0, 0, (b.radius + 3.2) * ringPulse, 0, Math.PI * 2);
+          ctx.stroke();
+        }
       }
       ctx.restore();
     }
@@ -4866,30 +5053,37 @@ export class SolarisEngine {
   }
 
   private renderTouchSticks(ctx: CanvasRenderingContext2D): void {
+    const maxR = this.getStickRadius();
+    const knobR = 20 * this.mobileControls.stickScale;
+    const opacity = this.mobileControls.opacity;
+    const showFixedIdle =
+      this.mobileControls.fixedSticks && (this.touchMode || this.isTouchDevice);
+
     const drawStick = (
       stick: { originX: number; originY: number; currX: number; currY: number },
       accentColor: string
     ) => {
       ctx.save();
+      ctx.globalAlpha = opacity;
       ctx.strokeStyle = 'rgba(232, 184, 75, 0.34)';
       ctx.fillStyle = 'rgba(11, 19, 32, 0.35)';
       ctx.lineWidth = 1.6;
       ctx.beginPath();
-      ctx.arc(stick.originX, stick.originY, this.stickMaxRadius, 0, Math.PI * 2);
+      ctx.arc(stick.originX, stick.originY, maxR, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
 
       ctx.strokeStyle = 'rgba(244, 239, 230, 0.14)';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.arc(stick.originX, stick.originY, this.stickMaxRadius * 0.48, 0, Math.PI * 2);
+      ctx.arc(stick.originX, stick.originY, maxR * 0.48, 0, Math.PI * 2);
       ctx.stroke();
 
       ctx.fillStyle = accentColor;
       ctx.strokeStyle = PALETTE.ivory;
       ctx.lineWidth = 1.6;
       ctx.beginPath();
-      ctx.arc(stick.currX, stick.currY, 20, 0, Math.PI * 2);
+      ctx.arc(stick.currX, stick.currY, knobR, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
       ctx.restore();
@@ -4897,9 +5091,18 @@ export class SolarisEngine {
 
     if (this.moveTouch) {
       drawStick(this.moveTouch, 'rgba(232, 184, 75, 0.72)');
+    } else if (showFixedIdle) {
+      const ox = this.mobileControls.movePos.x * this.width;
+      const oy = this.mobileControls.movePos.y * this.height;
+      drawStick({ originX: ox, originY: oy, currX: ox, currY: oy }, 'rgba(232, 184, 75, 0.42)');
     }
+
     if (this.aimTouch) {
       drawStick(this.aimTouch, 'rgba(232, 93, 74, 0.78)');
+    } else if (showFixedIdle) {
+      const ox = this.mobileControls.aimPos.x * this.width;
+      const oy = this.mobileControls.aimPos.y * this.height;
+      drawStick({ originX: ox, originY: oy, currX: ox, currY: oy }, 'rgba(232, 93, 74, 0.46)');
     }
   }
 
@@ -4922,6 +5125,16 @@ export class SolarisEngine {
         }
       }
 
+      this.cutsceneTrailTimer += dt;
+      if (this.cutsceneTrailTimer >= 0.015) {
+        this.cutsceneTrailTimer = 0;
+        const motion = this.getAct1ShipMotion(t, w, h);
+        this.cutsceneTrail.push({ x: motion.shipDrawX, y: motion.shipDrawY });
+        if (this.cutsceneTrail.length > 18) {
+          this.cutsceneTrail.shift();
+        }
+      }
+
       if (t >= 1.75 && !this.cutsceneFlags.launched) {
         this.cutsceneFlags.launched = true;
         this.cutsceneFlash = 0.72;
@@ -4934,6 +5147,7 @@ export class SolarisEngine {
     // Act 2: Rift exit into combat zone + squadron approach + slow-motion explosions (3.35s -> 6.35s)
     if (!this.cutsceneFlags.riftEntered) {
       this.cutsceneFlags.riftEntered = true;
+      this.cutsceneTrail = [];
       this.cutsceneFlash = 0.95;
       this.shakeIntensity = 10.5;
       this.audio.playCutsceneRiftExit();
@@ -4962,47 +5176,30 @@ export class SolarisEngine {
 
     const effDt = dt * this.cutsceneTimeScale;
 
-    // Player arrival flight path from hyperspace rift toward center arena
-    if (t < 4.35) {
-      const u = Math.min(1, (t - 3.35) / 1.0);
-      const ease = 1 - Math.pow(1 - u, 3);
-      const p0x = w * 0.16;
-      const p0y = h * 0.79;
-      const p1x = w * 0.35;
-      const p1y = h * 0.62;
-      const p2x = w * 0.46;
-      const p2y = h * 0.54;
-      const inv = 1 - ease;
-      this.player.x = inv * inv * p0x + 2 * inv * ease * p1x + ease * ease * p2x;
-      this.player.y = inv * inv * p0y + 2 * inv * ease * p1y + ease * ease * p2y;
-      this.player.angle = -0.62 + ease * 0.22;
+    // Player arrival flight path from hyperspace rift across arena to exact center at (-Math.PI / 2)
+    const pose = this.getAct2ShipPose(t, w, h);
+    this.player.x = pose.x;
+    this.player.y = pose.y;
+    this.player.angle = pose.angle;
 
-      if (t < 4.18 && Math.random() < 0.85) {
-        const backA = this.player.angle + Math.PI + (Math.random() - 0.5) * 0.35;
-        const spd = 120 + Math.random() * 140;
+    // Continuous subtle thruster particle wake along the entire Act 2 flight trajectory
+    if (t < 6.26) {
+      const spawnChance = (t < 5.05 ? 0.9 : 0.58) * Math.max(0.32, this.cutsceneTimeScale);
+      if (Math.random() < spawnChance) {
+        const backA = this.player.angle + Math.PI + (Math.random() - 0.5) * 0.36;
+        const spd = (t < 5.05 ? 115 : 75) + Math.random() * 120;
         this.spawnParticle(
           this.player.x + Math.cos(this.player.angle + Math.PI) * 18,
           this.player.y + Math.sin(this.player.angle + Math.PI) * 18,
           Math.cos(backA) * spd,
           Math.sin(backA) * spd,
-          2.6 + Math.random() * 2.4,
-          0.35 + Math.random() * 0.25,
+          2.2 + Math.random() * 2.2,
+          0.34 + Math.random() * 0.24,
           Math.random() < 0.55 ? PALETTE.brass : '#E888FF',
-          0.92,
+          0.88,
           'spark'
         );
       }
-    } else if (t < 5.65) {
-      const u = (t - 4.35) / 1.3;
-      this.player.x = w * (0.46 + u * 0.02);
-      this.player.y = h * (0.54 - u * 0.02);
-      this.player.angle = -0.4 - Math.sin(u * Math.PI) * 0.1;
-    } else {
-      const u = Math.min(1, (t - 5.65) / 0.7);
-      const ease = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
-      this.player.x = w * (0.48 + ease * 0.02);
-      this.player.y = h * (0.52 - ease * 0.02);
-      this.player.angle = -0.4 + ease * (-Math.PI / 2 + 0.4);
     }
 
     // Update enemy squadron formation
@@ -5100,6 +5297,161 @@ export class SolarisEngine {
     }
   }
 
+  private getAct1ShipMotion(
+    t: number,
+    w: number,
+    h: number
+  ): {
+    frontPair: SpritePair | undefined;
+    shipH0: number;
+    shipW0: number;
+    cx0: number;
+    cy0: number;
+    baseFuselageAngle: number;
+    axisCos0: number;
+    axisSin0: number;
+    nose0X: number;
+    nose0Y: number;
+    vpDist0: number;
+    vp0X: number;
+    vp0Y: number;
+    orbit: number;
+    launchRaw: number;
+    targetVpX: number;
+    targetVpY: number;
+    vpX: number;
+    vpY: number;
+    orbitShipX: number;
+    orbitShipY: number;
+    depthZ: number;
+    projU: number;
+    shipDrawX: number;
+    shipDrawY: number;
+    shipScale: number;
+  } {
+    const minDim = Math.min(w, h);
+    const frontPair = this.sprites.PLAYER_FRONT;
+    const imgAspect = frontPair ? frontPair.normal.width / frontPair.normal.height : 819 / 559;
+    const isNarrow = w < h * 1.15;
+    const shipH0 = isNarrow
+      ? Math.min(h * 0.46, (w * 0.84) / imgAspect)
+      : Math.min(h * 0.66, (w * 0.55) / imgAspect);
+    const shipW0 = shipH0 * imgAspect;
+    const rightBleed = Math.max(24, shipW0 * 0.08);
+    const topPad0 = Math.max(18, h * 0.045);
+    const cx0 = w - shipW0 * 0.5 + rightBleed;
+    const cy0 = topPad0 + shipH0 * 0.5;
+    const baseFuselageAngle = -0.46;
+    const axisCos0 = Math.cos(baseFuselageAngle);
+    const axisSin0 = Math.sin(baseFuselageAngle);
+    const nose0X = cx0 - 0.494 * shipW0;
+    const nose0Y = cy0 + 0.368 * shipH0;
+    const vpDist0 = Math.hypot(w, h) * 0.92;
+    const vp0X = nose0X - axisCos0 * vpDist0;
+    const vp0Y = nose0Y - axisSin0 * vpDist0;
+
+    const orbitRaw = Math.min(1, Math.max(0, t / 1.75));
+    const orbit =
+      orbitRaw < 0.5
+        ? 4 * orbitRaw * orbitRaw * orbitRaw
+        : 1 - Math.pow(-2 * orbitRaw + 2, 3) / 2;
+
+    const launchRaw = Math.min(1, Math.max(0, (t - 1.75) / 1.32));
+
+    const targetVpX = w * 0.5;
+    const targetVpY = h * 0.47;
+    const vpX = vp0X + (targetVpX - vp0X) * orbit;
+    const vpY = vp0Y + (targetVpY - vp0Y) * orbit;
+
+    // Quadratic Bezier orbit sweep: title ship center (cx0, cy0) -> (w*0.62, h*0.80) -> (w*0.50, h*0.54)
+    const p0x = cx0;
+    const p0y = cy0;
+    const p1x = w * 0.62;
+    const p1y = h * 0.8;
+    const p2x = w * 0.5;
+    const p2y = h * 0.54;
+    const inv = 1 - orbit;
+    const orbitShipX = inv * inv * p0x + 2 * inv * orbit * p1x + orbit * orbit * p2x;
+    const orbitShipY = inv * inv * p0y + 2 * inv * orbit * p1y + orbit * orbit * p2y;
+
+    const depthZ = t < 1.75 ? 1 : 1 + Math.pow(launchRaw, 2.35) * 45;
+    const projU = t < 1.75 ? 0 : 1 - 1 / depthZ;
+    const shipDrawX = orbitShipX + (vpX - orbitShipX) * projU;
+    const shipDrawY = orbitShipY + (vpY - orbitShipY) * projU;
+    const targetScale = isNarrow ? minDim * 0.15 : Math.min(w * 0.14, h * 0.19);
+    const startScale = Math.min(shipW0 * 0.34, targetScale * 1.65);
+    const baseScale = startScale * (1 - orbit) + targetScale * orbit;
+    const shipScale = baseScale / depthZ;
+
+    return {
+      frontPair,
+      shipH0,
+      shipW0,
+      cx0,
+      cy0,
+      baseFuselageAngle,
+      axisCos0,
+      axisSin0,
+      nose0X,
+      nose0Y,
+      vpDist0,
+      vp0X,
+      vp0Y,
+      orbit,
+      launchRaw,
+      targetVpX,
+      targetVpY,
+      vpX,
+      vpY,
+      orbitShipX,
+      orbitShipY,
+      depthZ,
+      projU,
+      shipDrawX,
+      shipDrawY,
+      shipScale,
+    };
+  }
+
+  private getAct2ShipPose(
+    t: number,
+    w: number,
+    h: number
+  ): { x: number; y: number; angle: number } {
+    const p0x = w * 0.16;
+    const p0y = h * 0.79;
+    const p1x = w * 0.27;
+    const p1y = h * 0.745;
+    const p2x = w * 0.5;
+    const p2y = h * 0.52;
+    const endAngleA = Math.atan2(p2y - p1y, p2x - p1x);
+
+    if (t < 5.05) {
+      const u = Math.min(1, Math.max(0, (t - 3.35) / 1.7));
+      // Continuous non-zero velocity arrival through (w*0.30, h*0.70) into (w*0.50, h*0.52)
+      const s = 0.72 * u + 0.28 * (1 - Math.pow(1 - u, 2));
+      const inv = 1 - s;
+      const x = inv * inv * p0x + 2 * inv * s * p1x + s * s * p2x;
+      const y = inv * inv * p0y + 2 * inv * s * p1y + s * s * p2y;
+      const dx = 2 * inv * (p1x - p0x) + 2 * s * (p2x - p1x);
+      const dy = 2 * inv * (p1y - p0y) + 2 * s * (p2y - p1y);
+      return { x, y, angle: Math.atan2(dy, dx) };
+    }
+
+    const u = Math.min(1, Math.max(0, (t - 5.05) / 1.3));
+    const ease = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+    const inv = 1 - ease;
+    const c2x = w * 0.53;
+    const c2y = h * 0.506;
+    const f2x = w * 0.5;
+    const f2y = h * 0.5;
+    const x = inv * inv * p2x + 2 * inv * ease * c2x + ease * ease * f2x;
+    const y = inv * inv * p2y + 2 * inv * ease * c2y + ease * ease * f2y;
+    const angBlend = u * u * (3 - 2 * u);
+    const angle = endAngleA + (-Math.PI / 2 - endAngleA) * angBlend;
+    return { x, y, angle };
+  }
+
   private renderIntroCutscene(ctx: CanvasRenderingContext2D, w: number, h: number): void {
     const t = this.cutsceneTime;
     const minDim = Math.min(w, h);
@@ -5107,33 +5459,33 @@ export class SolarisEngine {
 
     if (t < 3.35) {
       // ACT 1: Orbit around LEFT flank to rear + Hyper-warp launch leaving camera behind
-      const frontPair = this.sprites.PLAYER_FRONT;
-      const imgAspect = frontPair ? frontPair.normal.width / frontPair.normal.height : 819 / 559;
-      const isNarrow = w < h * 1.15;
-      const shipH0 = isNarrow
-        ? Math.min(h * 0.46, (w * 0.84) / imgAspect)
-        : Math.min(h * 0.66, (w * 0.55) / imgAspect);
-      const shipW0 = shipH0 * imgAspect;
-      const rightBleed = Math.max(24, shipW0 * 0.08);
-      const topPad0 = Math.max(18, h * 0.045);
-      const cx0 = w - shipW0 * 0.5 + rightBleed;
-      const cy0 = topPad0 + shipH0 * 0.5;
-      const baseFuselageAngle = -0.46;
-      const axisCos0 = Math.cos(baseFuselageAngle);
-      const axisSin0 = Math.sin(baseFuselageAngle);
-      const nose0X = cx0 - 0.494 * shipW0;
-      const nose0Y = cy0 + 0.368 * shipH0;
-      const vpDist0 = Math.hypot(w, h) * 0.92;
-      const vp0X = nose0X - axisCos0 * vpDist0;
-      const vp0Y = nose0Y - axisSin0 * vpDist0;
-
-      const orbitRaw = Math.min(1, Math.max(0, t / 1.75));
-      const orbit =
-        orbitRaw < 0.5
-          ? 4 * orbitRaw * orbitRaw * orbitRaw
-          : 1 - Math.pow(-2 * orbitRaw + 2, 3) / 2;
-
-      const launchRaw = Math.min(1, Math.max(0, (t - 1.75) / 1.32));
+      const m = this.getAct1ShipMotion(t, w, h);
+      const {
+        frontPair,
+        shipH0,
+        shipW0,
+        cx0,
+        cy0,
+        baseFuselageAngle,
+        axisCos0,
+        axisSin0,
+        nose0X,
+        nose0Y,
+        vpDist0,
+        orbit,
+        launchRaw,
+        targetVpX,
+        targetVpY,
+        vpX,
+        vpY,
+        orbitShipX,
+        orbitShipY,
+        depthZ,
+        projU,
+        shipDrawX,
+        shipDrawY,
+        shipScale,
+      } = m;
 
       // Camera zoom: subtle push-in during left-flank orbit without clipping wings on narrow screens
       const camZoom =
@@ -5142,14 +5494,10 @@ export class SolarisEngine {
           : 1.12 - Math.min(1, (t - 1.75) / 0.75) * 0.12;
 
       // Vanishing point sweeps from lower-left ahead of nose to dead-center ahead of ship
-      const targetVpX = w * 0.5;
-      const targetVpY = h * 0.47;
-      const vpX = vp0X + (targetVpX - vp0X) * orbit;
-      const vpY = vp0Y + (targetVpY - vp0Y) * orbit;
       const vpDist = vpDist0 * (1 - orbit) + minDim * 0.06 * orbit;
       const fullTunnelLen = vpDist + maxRadius * 1.15;
 
-      const hueCycle = (this.ambientTime) * 0.34;
+      const hueCycle = this.ambientTime * 0.34;
       const magentaPhase = 0.5 + 0.5 * Math.sin(hueCycle);
       const crimsonPhase = 0.5 + 0.5 * Math.sin(hueCycle + 2.1);
       const goldPhase = 0.5 + 0.5 * Math.sin(hueCycle + 4.2);
@@ -5273,7 +5621,6 @@ export class SolarisEngine {
           if (ws.foreground !== foregroundPass) continue;
           const progress = 1 - ws.z;
           const sideAngle = baseFuselageAngle + Math.sin(ws.angle * 3.7) * 0.34;
-          // Smoothly blend angle into full 360 tunnel rays as orbit finishes
           const rayAngle = sideAngle * (1 - orbit) + ws.angle * orbit;
           const cosA = Math.cos(rayAngle);
           const sinA = Math.sin(rayAngle);
@@ -5300,26 +5647,20 @@ export class SolarisEngine {
       };
 
       drawTunnelStreaks(false);
-      if (t < 0.18) {
+      if (t < 0.28) {
         ctx.save();
         ctx.globalAlpha = 0.55;
         drawTunnelStreaks(true);
         ctx.restore();
       }
 
-      // 6. Ship Orbit & Hyper-Warp Departure
-      const shipStartX = isNarrow ? w * 0.58 : w * 0.62;
-      const shipStartY = isNarrow
-        ? Math.max(cy0 + shipH0 * 0.08, h * 0.36)
-        : Math.max(cy0 + shipH0 * 0.04, h * 0.44);
+      // 6. Ship Orbit (Quadratic Bezier from title ship position) & Hyper-Warp Departure
       const shipTargetX = w * 0.5;
       const shipTargetY = h * 0.54;
-      const orbitShipX = shipStartX + (shipTargetX - shipStartX) * orbit;
-      const orbitShipY = shipStartY + (shipTargetY - shipStartY) * orbit;
 
-      // Phase A: Keep title closeup strictly anchored to top-right while fading out over 0.18s
-      if (frontPair && t < 0.18) {
-        const frontFade = Math.max(0, 1 - t / 0.18);
+      // Phase A: Crossfade title closeup cleanly over 0.28s anchored at (cx0, cy0)
+      if (frontPair && t < 0.28) {
+        const frontFade = Math.max(0, 1 - t / 0.28);
         if (frontFade > 0.01) {
           ctx.save();
           ctx.globalAlpha = frontFade;
@@ -5328,23 +5669,49 @@ export class SolarisEngine {
         }
       }
 
-      // Phase B: Full uncropped 3D-projected Solaris Chase Ship orbiting around left flank to dead-on rear, then blasting into deep tunnel
-      const ship3DFade = t < 0.05 ? 0 : Math.min(1, (t - 0.05) / 0.22);
+      // Phase B: Full 3D-projected Solaris ship emerging seamlessly at (cx0, cy0), sweeping along Bezier & launching
+      const ship3DFade = t < 0.02 ? 0 : Math.min(1, (t - 0.02) / 0.26);
       if (ship3DFade > 0.01 && launchRaw < 0.98) {
-        // Yaw sweeps from left-front 3/4 (-1.05 rad, matching PLAYER_FRONT) -> left broadside (-1.57) -> dead-on rear (-Math.PI)
         const yaw = -1.05 + (-Math.PI + 1.05) * Math.min(1, orbit * 1.03);
-        const bankRoll = Math.sin(orbit * Math.PI) * 0.16 * (1 - launchRaw);
+        const bankRoll = Math.sin(orbit * Math.PI) * 0.22 * (1 - launchRaw);
         const pitchRad = 0.42 * (1 - orbit) + 0.18 * orbit * (1 - launchRaw * 0.72);
-
-        // After 1.75s, camera stays behind while ship blasts down tunnel (depthZ = 1 -> 46)
-        const depthZ = t < 1.75 ? 1 : 1 + Math.pow(launchRaw, 2.35) * 45;
-        const projU = t < 1.75 ? 0 : 1 - 1 / depthZ;
-        const shipDrawX = orbitShipX + (vpX - orbitShipX) * projU;
-        const shipDrawY = orbitShipY + (vpY - orbitShipY) * projU;
-        const baseScale = isNarrow ? minDim * 0.15 : Math.min(w * 0.14, h * 0.19);
-        const shipScale = baseScale / depthZ;
         const engineHeat = t < 1.75 ? 0.65 + orbit * 0.85 : 2.6 - launchRaw * 0.8;
         const disappearAlpha = launchRaw > 0.72 ? Math.max(0, 1 - (launchRaw - 0.72) / 0.24) : 1;
+
+        // Luminous tapering brass & magenta ribbon trail across the last 18 positions
+        if (this.cutsceneTrail.length > 0 && disappearAlpha > 0.02) {
+          const pts = [...this.cutsceneTrail, { x: shipDrawX, y: shipDrawY }];
+          if (pts.length >= 2) {
+            const trailScaleFade = ship3DFade * disappearAlpha;
+            const depthThicknessFactor = 1 / Math.sqrt(depthZ);
+            ctx.save();
+            ctx.globalCompositeOperation = 'lighter';
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            for (let i = 1; i < pts.length; i++) {
+              const segRatio = i / (pts.length - 1);
+              const magAlpha = segRatio * segRatio * 0.48 * trailScaleFade;
+              if (magAlpha > 0.01) {
+                ctx.strokeStyle = `rgba(232, 136, 255, ${magAlpha.toFixed(3)})`;
+                ctx.lineWidth = Math.max(1.2, (1.4 + segRatio * 12) * depthThicknessFactor);
+                ctx.beginPath();
+                ctx.moveTo(pts[i - 1].x, pts[i - 1].y);
+                ctx.lineTo(pts[i].x, pts[i].y);
+                ctx.stroke();
+              }
+              const brassAlpha = segRatio * segRatio * segRatio * 0.82 * trailScaleFade;
+              if (brassAlpha > 0.01) {
+                ctx.strokeStyle = `rgba(232, 184, 75, ${brassAlpha.toFixed(3)})`;
+                ctx.lineWidth = Math.max(0.8, (0.7 + segRatio * 5.2) * depthThicknessFactor);
+                ctx.beginPath();
+                ctx.moveTo(pts[i - 1].x, pts[i - 1].y);
+                ctx.lineTo(pts[i].x, pts[i].y);
+                ctx.stroke();
+              }
+            }
+            ctx.restore();
+          }
+        }
 
         // Twin ionized warp contrails stretching behind the departing ship toward camera
         if (t >= 1.75 && disappearAlpha > 0.02) {
@@ -5372,7 +5739,6 @@ export class SolarisEngine {
             ctx.stroke();
           }
 
-          // Distant pinpoint star-flash right as the ship vanishes out of camera sight
           if (launchRaw > 0.55) {
             const glintAlpha = Math.sin(((launchRaw - 0.55) / 0.45) * Math.PI) * 0.95;
             const glintR = minDim * (0.06 + (1 - launchRaw) * 0.06);
@@ -5426,13 +5792,13 @@ export class SolarisEngine {
         ctx.restore();
       }
 
-      if (t >= 0.18) {
+      if (t >= 0.28) {
         drawTunnelStreaks(true);
       }
       ctx.restore(); // end camZoom
 
-      // Subtle golden warp pulse during 0 -> 0.26s crossfade from title close-up
-      const introPulse = t < 0.26 ? Math.sin((t / 0.26) * Math.PI) * 0.32 : 0;
+      // Subtle golden warp pulse during 0 -> 0.30s crossfade from title close-up
+      const introPulse = t < 0.3 ? Math.sin((t / 0.3) * Math.PI) * 0.28 : 0;
       // Peak transition flash into Act 2 (3.14s -> 3.35s)
       const endFlash = t > 3.12 ? Math.pow((t - 3.12) / 0.23, 2) * 0.96 : 0;
       const totalFlash = Math.min(1, Math.max(this.cutsceneFlash, endFlash, introPulse));
@@ -5446,27 +5812,23 @@ export class SolarisEngine {
 
     // ACT 2: Combat zone arrival, enemy squadron approach & slow-motion explosions (3.35s -> 6.35s)
     let camZoom = 1;
-    let camFocusX = w * 0.5;
-    let camFocusY = h * 0.5;
     if (t < 4.35) {
       const u = (t - 3.35) / 1.0;
       const ease = 1 - Math.pow(1 - u, 2);
       camZoom = 1.2 - ease * 0.12;
-      camFocusX = w * (0.36 + ease * 0.16);
-      camFocusY = h * (0.62 - ease * 0.12);
     } else if (t < 5.65) {
       const u = Math.min(1, (t - 4.35) / 0.75);
       const ease = u * u * (3 - 2 * u);
       camZoom = 1.08 + ease * 0.16;
-      camFocusX = w * (0.52 + ease * 0.07);
-      camFocusY = h * (0.5 - ease * 0.06);
     } else {
       const u = Math.min(1, (t - 5.65) / 0.7);
       const ease = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
       camZoom = 1.24 - ease * 0.24;
-      camFocusX = w * (0.59 - ease * 0.09);
-      camFocusY = h * (0.44 + ease * 0.06);
     }
+
+    // Camera tracks only 30% of the ship's displacement from screen center so the ship sweeps visibly across the arena
+    const camFocusX = w * 0.5 + (this.player.x - w * 0.5) * 0.3;
+    const camFocusY = h * 0.5 + (this.player.y - h * 0.5) * 0.3;
 
     ctx.save();
     ctx.translate(w * 0.5, h * 0.5);
@@ -5474,6 +5836,35 @@ export class SolarisEngine {
     ctx.translate(-camFocusX, -camFocusY);
 
     this.renderBackdrop(ctx, w, h);
+
+    // Thin brass astrolabe dashed guide ahead of ship (vanishes behind ship as it flies)
+    if (t < 6.28) {
+      const guideAlpha = t < 5.9 ? 0.28 : Math.max(0, (6.28 - t) / 0.38) * 0.28;
+      if (guideAlpha > 0.01) {
+        ctx.save();
+        ctx.strokeStyle = `rgba(232, 184, 75, ${guideAlpha.toFixed(3)})`;
+        ctx.lineWidth = 1.25;
+        ctx.setLineDash([6, 7]);
+        ctx.beginPath();
+        ctx.moveTo(this.player.x, this.player.y);
+        const steps = 20;
+        for (let s = 1; s <= steps; s++) {
+          const st = t + ((6.35 - t) * s) / steps;
+          const pt = this.getAct2ShipPose(st, w, h);
+          ctx.lineTo(pt.x, pt.y);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Small brass astrolabe center reticle at destination (w*0.5, h*0.5)
+        ctx.strokeStyle = `rgba(232, 184, 75, ${(guideAlpha * 0.9).toFixed(3)})`;
+        ctx.lineWidth = 1.1;
+        ctx.beginPath();
+        ctx.arc(w * 0.5, h * 0.5, 7, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
 
     // Dimensional warp-exit rift behind incoming player ship (3.35s -> 4.35s)
     if (t < 4.45) {
@@ -5547,8 +5938,8 @@ export class SolarisEngine {
     ctx.translate(this.player.x, this.player.y);
     ctx.rotate(this.player.angle);
     ctx.translate(-this.player.recoil * 4, 0);
-    const arrivalBoost = t < 4.2 ? 1.85 : 1.05;
-    this.drawShipHull(ctx, t < 4.1, arrivalBoost, false);
+    const arrivalBoost = t < 5.15 ? 1.85 : 1.05;
+    this.drawShipHull(ctx, t < 5.15, arrivalBoost, false);
     ctx.restore();
 
     this.renderParticlesAndWaves(ctx);
